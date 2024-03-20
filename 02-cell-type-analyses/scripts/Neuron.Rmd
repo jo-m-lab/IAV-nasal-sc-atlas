@@ -1,0 +1,227 @@
+---
+title: "Neuron"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"neuron"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+load in neuron object
+```{r}
+neuron = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/neuron_raw.RDS")
+```
+
+We now reprocess the neuron object iteratively until all multiplet/contaminating clusters have been removed
+
+# Round 1
+Subset
+```{r}
+neuron = subset(neuron, features = c(rownames(neuron)[which(rowSums(neuron@assays$SCT@counts > 0) >= 10)], 
+                               rownames(neuron[["HTO"]])))
+neuron
+```
+
+Reprocessing
+```{r}
+neuron = SCTransform(neuron, verbose = TRUE, method = "glmGamPoi")
+neuron = RunPCA(neuron, verbose = TRUE)
+DimPlot(neuron, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(neuron, ndims = 50)
+neuron = FindNeighbors(neuron, dims = 1:20, k.param = 30, force.recalc = TRUE)
+neuron = FindClusters(neuron, resolution = 0.2)
+neuron = FindClusters(neuron, resolution = 0.3)
+neuron = FindClusters(neuron, resolution = 0.4)
+neuron = RunUMAP(neuron, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(neuron, pt.size = 0.1, group.by = "SCT_snn_res.0.2", label = TRUE) + NoLegend()
+DimPlot(neuron, pt.size = 0.1, group.by = "SCT_snn_res.0.3", label = TRUE) + NoLegend()
+#DimPlot(neuron, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(neuron, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(neuron, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+neuron = SetIdent(neuron, value = "SCT_snn_res.0.3")
+neuron.all.res03.markers = FindAllMarkers(neuron, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(neuron.all.res03.markers, "neuron/neuron_r1_res03_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+VlnPlot(neuron, c("Omp","Epcam","Col3a1","Obp1a","Ptprc","Flt1"), pt.size = -1, stack = TRUE)
+```
+Cluster 10 is multiplets/garbage
+Cluster 12 are dying cells
+
+** Using res = 0.3 **
+
+Now we recluster again!
+
+# Round 2
+Remove clusters 10, 12
+```{r}
+good.neuron.r1 = c(0:9,11,13)
+neuron = SetIdent(neuron, value = "SCT_snn_res.0.3")
+neuron.r2 = subset(neuron, subset = SCT_snn_res.0.3 %in% good.neuron.r1)
+neuron.r2 = subset(neuron.r2, features = c(rownames(neuron.r2)[which(rowSums(neuron.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(neuron.r2[["HTO"]])))
+neuron.r2
+```
+
+Reprocess
+```{r}
+neuron.r2 = SCTransform(neuron.r2, verbose = TRUE, method = "glmGamPoi")
+neuron.r2 = RunPCA(neuron.r2, verbose = TRUE)
+DimPlot(neuron.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(neuron.r2, ndims = 50)
+neuron.r2 = FindNeighbors(neuron.r2, dims = 1:15, k.param = 30, force.recalc = TRUE)
+neuron.r2 = FindClusters(neuron.r2, resolution = 0.1)
+neuron.r2 = FindClusters(neuron.r2, resolution = 0.2)
+#neuron.r2 = FindClusters(neuron.r2, resolution = 0.3)
+neuron.r2 = RunUMAP(neuron.r2, dims = 1:15, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(neuron.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.1", label = TRUE)
+DimPlot(neuron.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.2", label = TRUE)
+#DimPlot(neuron.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.3", label = TRUE)
+DimPlot(neuron.r2, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(neuron.r2, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+neuron.r2 = SetIdent(neuron.r2, value = "SCT_snn_res.0.1")
+neuron.r2.all.markers.res01 = FindAllMarkers(neuron.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(neuron.r2.all.markers.res01, "neuron/neuron_r2_res01_markers.xlsx", overwrite = TRUE)
+
+neuron.r2 = SetIdent(neuron.r2, value = "SCT_snn_res.0.2")
+neuron.r2.all.markers.res02 = FindAllMarkers(neuron.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(neuron.r2.all.markers.res02, "neuron/neuron_r2_res02_markers.xlsx", overwrite = TRUE)
+
+# neuron.r2 = SetIdent(neuron.r2, value = "SCT_snn_res.1")
+# neuron.r2.all.markers.res1 = FindAllMarkers(neuron.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(neuron.r2.all.markers.res1, "neuron/neuron_r2_res1_markers.xlsx", overwrite = TRUE)
+```
+
+VlnPlots for contamination
+```{r}
+neuron.r2 = SetIdent(neuron.r2, value = "SCT_snn_res.0.2")
+VlnPlot(neuron.r2, c("Pdlim1","Acsm4","Omp"), pt.size = -1, stack = TRUE) + NoLegend()
+```
+
+No clear contaminant clusters!
+** USING res = 0.2 **
+
+Assign names from excel sheet
+```{r}
+neuron.cluster.names = c("OSN","Acsm4+ OSN","Dlg2+ OSN","Differentiating OSN","Cd36+ OSN","Neural Progenitor","Calb2+ OSN","Vomeronasal Sensory Neuron","Emx1+ Stem Cell")
+neuron.cluster.names.order = c(5,3,6,0,1,2,4,7,8)+1
+neuron.palette = c("#597536","#75c855","#5ec1af","#6d70b2","#8544ba","#ca5b97","#8a413a","#d8593f","#caaa4e")
+names(neuron.palette) = neuron.cluster.names[neuron.cluster.names.order]
+```
+```{r}
+neuron.r2$cluster.names = plyr::mapvalues(neuron.r2$SCT_snn_res.0.2, from = 0:8, to = neuron.cluster.names)
+neuron.r2$cluster.names = factor(neuron.r2$cluster.names, levels = neuron.cluster.names[neuron.cluster.names.order])
+```
+
+
+# Clustering Results
+Sample by cluster
+```{r}
+neuron.r2.cluster.by.sample = neuron.r2@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+neuron.r2.cluster.by.sample$orig.ident = factor(neuron.r2.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(neuron.r2.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("neuron/neuron_r2_sample_by_cluster.pdf", height = 5, width = 5)
+```
+
+
+Replot umap with new names
+```{r}
+DimPlot(neuron.r2, pt.size = 0.1, group.by = "cluster.names", label = TRUE, cols = neuron.r2.palette) + NoLegend()
+ggsave("neuron/neuron_r2_named_UMAP.pdf", height = 7, width = 7)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+neuron.r2$orig.ident = factor(neuron.r2$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+neuron.RM.freq.by.hash = CalcFreqByHashMD(metadata = neuron.r2@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                           filename = "neuron/neuron_RM_freq_by_Hash.pdf")
+neuron.OM.freq.by.hash = CalcFreqByHashMD(metadata = neuron.r2@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                           filename = "neuron/neuron_OM_freq_by_Hash.pdf")
+neuron.LNG.freq.by.hash = CalcFreqByHashMD(metadata = neuron.r2@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                            filename = "neuron/neuron_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+neuron.r2 = SetIdent(neuron.r2, value = "cluster.names")
+
+neuron.v3.cluster.genes = c("Omp","Tubb3","Sox11","Neurod1","Gap43","Stmn1","Calb2","Rims3","Stoml3","Nfix",
+                           "Acsm4","Nqo1","Dlg2","Kirrel2","Cd36","Cd55","Gnai2","S100z","Emx1","Dmrta2")
+
+VlnPlot(neuron.r2, features = neuron.v3.cluster.genes, pt.size = -1, cols = neuron.r2.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("neuron/neuron_r2_cluster_markers_violin.pdf", height = 4, width = 8)
+```
+
+Save Seurat object
+```{r}
+saveRDS(neuron.r3, "neuron/neuron_processed.RDS", compress = FALSE)
+```
+

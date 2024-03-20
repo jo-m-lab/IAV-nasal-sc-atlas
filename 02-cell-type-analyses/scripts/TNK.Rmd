@@ -1,0 +1,341 @@
+---
+title: "T/NK Cells"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"TNK"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in stromal object
+```{r}
+TNK = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/TNK_raw.RDS")
+```
+
+We now reprocess the T/NK cell object iteratively until all multiplet/contaminating clusters have been removed
+
+# Round 1
+Subset
+```{r}
+TNK = subset(TNK, features = c(rownames(TNK)[which(rowSums(TNK@assays$SCT@counts > 0) >= 10)], 
+                               rownames(TNK[["HTO"]])))
+TNK
+```
+
+Reprocessing
+```{r}
+TNK = SCTransform(TNK, verbose = TRUE, method = "glmGamPoi")
+TNK = RunPCA(TNK, verbose = TRUE)
+DimPlot(TNK, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(TNK, ndims = 50)
+TNK = FindNeighbors(TNK, dims = 1:20, k.param = 30, force.recalc = TRUE)
+TNK = FindClusters(TNK, resolution = 0.4)
+TNK = FindClusters(TNK, resolution = 0.6)
+TNK = FindClusters(TNK, resolution = 0.8)
+TNK = RunUMAP(TNK, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(TNK, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(TNK, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(TNK, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(TNK, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(TNK, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+TNK = SetIdent(TNK, value = "SCT_snn_res.0.4")
+TNK.all.markers.res04 = FindAllMarkers(TNK, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(TNK.all.markers.res04, "TNK/TNK_r1_res04_markers.xlsx") #r1 = round 1
+
+TNK = SetIdent(TNK, value = "SCT_snn_res.0.6")
+TNK.all.markers.res06 = FindAllMarkers(TNK, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(TNK.all.markers.res06, "TNK/TNK_r1_res06_markers.xlsx") #r1 = round 1
+
+TNK = SetIdent(TNK, value = "SCT_snn_res.0.8")
+TNK.all.markers.res08 = FindAllMarkers(TNK, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(TNK.all.markers.res08, "TNK/TNK_r1_res08_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+VlnPlot(TNK, features = c("Nkg7","Omp","Pecam1","Lyz2"), pt.size = 0.1)
+```
+
+For res 08, Cluster 3 is mostly OBP genes, Cluster 7 is OSN Doublets, Cluster 15 is Epithelial Doublets, Cluster 16 is Myeloid Doublets
+** Using res = 0.8 **
+
+# Round 2
+Remove clusters 3, 7, 15, 16
+```{r}
+TNK = SetIdent(TNK, value = "SCT_snn_res.0.8")
+TNK.r2 = subset(TNK, idents = c(0:2,4:6,8:14))
+TNK.r2 = subset(TNK.r2, features = c(rownames(TNK.r2)[which(rowSums(TNK.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(TNK.r2[["HTO"]])))
+TNK.r2
+```
+
+Reprocess
+```{r}
+TNK.r2 = SCTransform(TNK.r2, verbose = TRUE, method = "glmGamPoi")
+TNK.r2 = RunPCA(TNK.r2, verbose = TRUE)
+DimPlot(TNK.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(TNK.r2, ndims = 50)
+TNK.r2 = FindNeighbors(TNK.r2, dims = 1:20, k.param = 30, force.recalc = TRUE)
+TNK.r2 = FindClusters(TNK.r2, resolution = 0.8)
+TNK.r2 = FindClusters(TNK.r2, resolution = 1.0)
+TNK.r2 = RunUMAP(TNK.r2, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(TNK.r2, pt.size = 0.5, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(TNK.r2, pt.size = 0.5, group.by = "SCT_snn_res.1", label = TRUE) + NoLegend()
+DimPlot(TNK.r2, pt.size = 0.5, group.by = "orig.ident", cols = sample.palette)
+```
+
+Find Markers
+```{r}
+TNK.r2 = SetIdent(TNK.r2, value = "SCT_snn_res.0.8")
+TNK.all.markers.res08.r2 = FindAllMarkers(TNK.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(TNK.all.markers.res08.r2, "TNK/TNK_r2_res08_markers.xlsx")
+
+TNK.r2 = SetIdent(TNK.r2, value = "SCT_snn_res.1")
+TNK.all.markers.res1.r2 = FindAllMarkers(TNK.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(TNK.all.markers.res1.r2, "TNK/TNK_r2_res1_markers.xlsx")
+```
+
+Specific comparisons to look at differences between similar clusters
+```{r}
+TNK.r2.10v12 = FindMarkers(TNK.r2, ident.1 = 10, ident.2 = 12, logfc.threshold = 0.5, min.pct = 0.2) 
+TNK.r2.0v14 = FindMarkers(TNK.r2, ident.1 = 0, ident.2 = 14, logfc.threshold = 0.5, min.pct = 0.2) 
+TNK.r2.3v15= FindMarkers(TNK.r2, ident.1 = 3, ident.2 = 15, logfc.threshold = 0.5, min.pct = 0.2)
+```
+
+Lineage Vlns
+```{r}
+VlnPlot(TNK.r2, features = c("Trbc2","Cd3e","Trdc","Tcrg-C1","Trac","Gzma","Gzmb","Cd8b1","Ncr1", "Cd4", "Il7r","Cd3g","Cxcr6"), pt.size = -1, stack=TRUE)
+```
+
+Using res = 1, we still see cluster 11 as contaminated with other cell lineage genes
+
+# T+NK Cells round 3
+Remove cluster 11
+```{r}
+TNK.r2 = SetIdent(TNK.r2, value = "SCT_snn_res.1")
+TNK.r3 = subset(TNK.r2, idents = c(0:10,12:15))
+TNK.r3 = subset(TNK.r3, features = c(rownames(TNK.r3)[which(rowSums(TNK.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(TNK.r3[["HTO"]])))
+TNK.r3
+```
+
+Reprocess
+```{r}
+TNK.r3 = SCTransform(TNK.r3, verbose = TRUE, method = "glmGamPoi")
+TNK.r3 = RunPCA(TNK.r3, verbose = TRUE)
+DimPlot(TNK.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(TNK.r3, ndims = 50)
+TNK.r3 = FindNeighbors(TNK.r3, dims = 1:25, k.param = 30, force.recalc = TRUE)
+#TNK.r3 = FindClusters(TNK.r3, resolution = 0.8)
+TNK.r3 = FindClusters(TNK.r3, resolution = 1.0)
+TNK.r3 = FindClusters(TNK.r3, resolution = 1.2)
+TNK.r3 = RunUMAP(TNK.r3, dims = 1:25, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+#DimPlot(TNK.r3, pt.size = 0.5, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(TNK.r3, pt.size = 0.5, group.by = "SCT_snn_res.1", label = TRUE) + NoLegend()
+DimPlot(TNK.r3, pt.size = 0.5, group.by = "SCT_snn_res.1.2", label = TRUE) + NoLegend()
+DimPlot(TNK.r3, pt.size = 0.5, group.by = "orig.ident", cols = sample.palette)
+```
+
+Find Markers
+```{r}
+# TNK.r3 = SetIdent(TNK.r3, value = "SCT_snn_res.0.8")
+# TNK.all.markers.res08.r3 = FindAllMarkers(TNK.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(TNK.all.markers.res08.r3, "TNK/TNK_r3_res08_markers.xlsx")
+
+TNK.r3 = SetIdent(TNK.r3, value = "SCT_snn_res.1")
+TNK.all.markers.res1.r3 = FindAllMarkers(TNK.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(TNK.all.markers.res1.r3, "TNK/TNK_r3_res1_markers.xlsx")
+
+TNK.r3 = SetIdent(TNK.r3, value = "SCT_snn_res.1.2")
+TNK.all.markers.res1.2.r3 = FindAllMarkers(TNK.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(TNK.all.markers.res1.2.r3, "TNK/TNK_r3_res1.2_markers.xlsx")
+```
+
+Specific comparisons to look at differences between similar clusters (using res = 1.2)
+```{r}
+TNK.r3.10v11 = FindMarkers(TNK.r3, ident.1 = 10, ident.2 = 11, logfc.threshold = 0.5, min.pct = 0.2) 
+TNK.r3.0v6 = FindMarkers(TNK.r3, ident.1 = 0, ident.2 = 6, logfc.threshold = 0.5, min.pct = 0.2) 
+```
+
+** We choose res = 1.2 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+TNK.cluster.names = c("Gzma++Cma1+ NK","Gzmc+Cd49a+ NK","Cd103+ CD8 T","Ccr7+ CD8 T","Helios+ T","CD4 T","Gzma+Ctla2a+ NK","Gzmk+ CD8 T",
+                      "IFN-Stim T","ILC2","Cd40lg+Il17a+ T","Cd163l1+Il17a+ gdT","Cycling T","IFN-Stim NK","Ifng+Cd200+ CD4 T","ILC3")
+TNK.cluster.names.order = c(0,6,1,13,3,2,7,8,12,5,14,10,4,11,9,15)+1
+TNK.r3.palette = c("#90311d","#db6464","#dc3141","#de5d2e","#764bcd","#6f7bdb","#72bb37","#4fbb6f","#452b86","#d77bcf"
+                   ,"#8e3586","#d143be","#5f862c","#ce4079","#bbab3a","#ce8536")
+names(TNK.r3.palette) = TNK.cluster.names[TNK.cluster.names.order]
+
+TNK.r3$cluster.names = plyr::mapvalues(TNK.r3$SCT_snn_res.1.2, from = 0:15, to = TNK.cluster.names)
+TNK.r3$cluster.names = factor(TNK.r3$cluster.names, levels = TNK.cluster.names[TNK.cluster.names.order])
+```
+
+# Clustering Results
+Sample by cluster
+```{r}
+TNK.r3.cluster.by.sample = TNK.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+TNK.r3.cluster.by.sample$orig.ident = factor(TNK.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(TNK.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("TNK/TNK_r3_sample_by_cluster.pdf", height = 5, width = 7)
+```
+
+Replot umap with new names
+```{r}
+DimPlot(TNK.r3, pt.size = 0.5, group.by = "cluster.names", label = TRUE, cols = TNK.r3.palette) + NoLegend()
+ggsave("TNK/TNK_r3_named_UMAP.pdf", height = 7, width = 7)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+TNK.r3$orig.ident = factor(TNK.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+TNK.RM.freq.by.hash = CalcFreqByHashMD(metadata = TNK.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 15, plot.width = 10, plot.ncol = 5, 
+                                           filename = "TNK/TNK_RM_freq_by_Hash.pdf")
+TNK.OM.freq.by.hash = CalcFreqByHashMD(metadata = TNK.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 15, plot.width = 10, plot.ncol = 5, 
+                                           filename = "TNK/TNK_OM_freq_by_Hash.pdf")
+TNK.LNG.freq.by.hash = CalcFreqByHashMD(metadata = TNK.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 15, plot.width = 10, plot.ncol = 5, 
+                                            filename = "TNK/TNK_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+TNK.r3 = SetIdent(TNK.r3, value = "cluster.names")
+
+TNKv3.cluster.genes = c("Klrb1c","Gzmb","Prf1","Ncr1","Gzma","Cma1","Ctla2a","Gzmc","Itga1","Ifi204","Isg15","Trbc2","Cd3e","Cd8b1","Ccr7","Itgae","Cxcr6",
+                        "Gzmk","Pdcd1","Ifit3","Cxcl10","Mki67","Top2a","Cd4","Tnfrsf4","Foxp3","Cd200","Ifng","Cd40lg","Il17a","Ikzf2","Klra6","Trdc",
+                        "Cd163l1","Areg","Il13","Igfbp7","Il22")
+
+VlnPlot(TNK.r3, features = TNKv3.cluster.genes, pt.size = -1, cols = TNK.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("TNK/TNK_r3_cluster_markers_violin.pdf", height = 6, width = 12)
+```
+
+Save Seurat object
+```{r}
+saveRDS(TNK.r3, "TNK/TNK_processed.RDS", compress = FALSE)
+```
+
+
+# TRM analysis
+Do our Trms have the signatures in the literature?
+Here we take 5 cluster of CD8 T cells from RM to evaluate
+```{r}
+CD8.RM = subset(TNK.r3, subset = region == "RM" & cluster.names %in% c("Ccr7+ CD8 T", "Gzmk+ CD8 T", "Cd103+ CD8 T", "IFN-Stim T", "Cycling"))
+CD8.RM$cluster.names = factor(CD8.RM$cluster.names)
+```
+
+## Milner 2017 Universal TRM Score
+Reference doi: 10.1038/nature24993
+Read in gene lists (included in the git repo) and filter to the genes present in our single-cell data
+```{r}
+milner.gene.sets = list(trm.sig = read.xlsx("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Milner_2017_Trm_Circ_Signatures.xlsx")[,1], 
+                        circ.sig = read.xlsx("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Milner_2017_Trm_Circ_Signatures.xlsx")[,2])
+milner.gene.sets[[2]] = milner.gene.sets[[2]][!is.na(milner.gene.sets[[2]])]
+
+milner.gene.sets = lapply(milner.gene.sets, function(x) x[x %in% rownames(CD8.RM)])
+```
+
+Module score for TRM and circulating signatures and plot violins
+```{r}
+CD8.RM = AddModuleScore(CD8.RM, features = milner.gene.sets, name = c("Milner.Trm.Score","Milner.Circ.Score"))
+
+VlnPlot(CD8.RM, features = c("Milner.Trm.Score1", "Milner.Circ.Score2"), pt.size = -1, cols = TNK.r3.palette)
+ggsave("TNK/Milner_Trm_Circ_Scores_Vln.pdf", height = 5, width = 8)
+```
+
+Calculate effect size (Cohen's D) between Ccr7 CD8 and other clusters 
+```{r}
+#Trm score
+milner.Trm.scores = split(CD8.RM$Milner.Trm.Score1, f = CD8.RM$cluster.names)
+milner.Trm.cohensD = list()
+for(i in 1:(length(milner.Trm.scores)-1)){
+  milner.Trm.cohensD[[i]] = lsr::cohensD(x = milner.Trm.scores[[1]], y = milner.Trm.scores[[i+1]], method = "unequal")
+}
+names(milner.Trm.cohensD) = names(milner.Trm.scores[2:length(milner.Trm.scores)])
+
+#circulating
+milner.CM.scores = split(CD8.RM$Milner.Circ.Score2, f = CD8.RM$cluster.names)
+milner.CM.cohensD = list()
+for(i in 1:(length(milner.CM.scores)-1)){
+  milner.CM.cohensD[[i]] = lsr::cohensD(x = milner.CM.scores[[1]], y = milner.CM.scores[[i+1]], method = "unequal")
+}
+names(milner.CM.cohensD) = names(milner.CM.scores[2:length(milner.CM.scores)])
+```
+
+
+## Crowl 2022 multi-tissue TRM markers
+doi: 10.1038/s41590-022-01229-8
+Crowl et al looks across multiple tissues by single cell at the following genes for circulatory/residency
+```{r}
+crowl.circ_res = c("Klf2","S1pr1","Tcf7","Sell","Il7r","Runx3","Itgae","Cdh1","Zfp683","Gzma","Gzmb","Prdm1","Klrg1","Cd69","Il2rb",
+                   "Tbx21","Ahr","Nr4a1","Eomes","P2rx7","Egr2")
+DotPlot(CD8.RM, features = crowl.circ_res) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("TRM/Crowl_trm_circ_goi_dotplot.pdf", height = 3.5, width = 8)
+```
+

@@ -1,0 +1,275 @@
+---
+title: "Stromal"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+** Note, run this script before Endothelial.Rmd, as some endothelial cells snuck into this clustering**
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"stromal"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in stromal object
+```{r}
+stromal = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/stromal_raw.RDS")
+```
+
+We now reprocess the stromal object iteratively until all multiplet/contaminating clusters have been removed
+
+# Round 1
+Remove genes not expressed in this object
+```{r}
+stromal = subset(stromal, features = c(rownames(stromal)[which(rowSums(stromal@assays$SCT@counts > 0) >= 10)], 
+                               rownames(stromal[["HTO"]])))
+stromal
+```
+
+Reprocessing
+```{r}
+stromal = SCTransform(stromal, verbose = TRUE, method = "glmGamPoi")
+stromal = RunPCA(stromal, verbose = TRUE)
+DimPlot(stromal, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(stromal, ndims = 50)
+stromal = FindNeighbors(stromal, dims = 1:30, k.param = 30, force.recalc = TRUE)
+stromal = FindClusters(stromal, resolution = 0.4)
+stromal = FindClusters(stromal, resolution = 0.6)
+#stromal = FindClusters(stromal, resolution = 0.8)
+stromal = RunUMAP(stromal, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(stromal, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(stromal, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+#DimPlot(stromal, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(stromal, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(stromal, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+# stromal = SetIdent(stromal, value = "SCT_snn_res.0.4")
+# stroma.all.res04.markers = FindAllMarkers(stromal, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(stroma.all.res04.markers, "stroma_r1_res04_markers.xlsx") #r1 = round 1
+
+stromal = SetIdent(stromal, value = "SCT_snn_res.0.6")
+stromal.all.res06.markers = FindAllMarkers(stromal, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(stromal.all.res06.markers, "stromal/stromal_r1_res06_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+VlnPlot(stromal, c("Omp","Epcam","Pecam1","Ptprc","Obp1a"), pt.size = -1, stack = TRUE)
+```
+Cluster 1, 4, 5 have OMP/Epcam
+Cluster 7 are endothelial cells (remove and keep for later)
+Cluster 12 is macrophage doublets
+Cluster 13, 14 are epithelial doublets
+
+** Using res = 0.6 **
+
+Save cluster 7 separately
+```{r}
+stromal.endo = subset(stromal, subset = SCT_snn_res.0.6 == 7)
+saveRDS(stromal.endo, file = "stromal/stromal_endothelial.RDS", compress = FALSE)
+```
+
+Now we recluster again!
+
+# Round 2
+Remove clusters 4, 5, 7, 8, 11-13
+```{r}
+good.stroma.r1 = c(0,2,3,6,8:11) #cluster to keep
+stromal = SetIdent(stromal, value = "SCT_snn_res.0.6")
+stromal.r2 = subset(stromal, subset = SCT_snn_res.0.6 %in% good.stroma.r1)
+stromal.r2 = subset(stromal.r2, features = c(rownames(stromal.r2)[which(rowSums(stromal.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(stromal.r2[["HTO"]])))
+stromal.r2
+```
+
+Reprocess
+```{r}
+stromal.r2 = SCTransform(stromal.r2, verbose = TRUE, method = "glmGamPoi")
+stromal.r2 = RunPCA(stromal.r2, verbose = TRUE)
+DimPlot(stromal.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(stromal.r2, ndims = 50)
+stromal.r2 = FindNeighbors(stromal.r2, dims = 1:15, k.param = 30, force.recalc = TRUE)
+stromal.r2 = FindClusters(stromal.r2, resolution = 0.4)
+stromal.r2 = FindClusters(stromal.r2, resolution = 0.6)
+stromal.r2 = RunUMAP(stromal.r2, dims = 1:15, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(stromal.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(stromal.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(stromal.r2, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(stromal.r2, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+stromal.r2 = SetIdent(stromal.r2, value = "SCT_snn_res.0.4")
+stromal.r2.all.markers.res04 = FindAllMarkers(stromal.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(stromal.r2.all.markers.res04, "stromal/stromal_r2_res04_markers.xlsx", overwrite = TRUE)
+
+stromal.r2 = SetIdent(stromal.r2, value = "SCT_snn_res.0.6")
+stromal.r2.all.markers.res06 = FindAllMarkers(stromal.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(stromal.r2.all.markers.res06, "stromal/stromal_r2_res06_markers.xlsx", overwrite = TRUE)
+```
+
+Cluster 10 are multiplets on res = 0.6
+** Choosing res = 0.6**
+
+
+# Round 3
+Remove final multiplet cluster 10 using res = 0.6
+```{r}
+good.stroma.r2 = c(0:9)
+stromal.r3 = subset(stromal.r2, subset = SCT_snn_res.0.6 %in% good.stroma.r2)
+stromal.r3 = subset(stromal.r3, features = c(rownames(stromal.r3)[which(rowSums(stromal.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(stromal.r3[["HTO"]])))
+stromal.r3
+```
+
+Reprocess
+```{r}
+stromal.r3 = SCTransform(stromal.r3, verbose = TRUE, method = "glmGamPoi")
+stromal.r3 = RunPCA(stromal.r3, verbose = TRUE)
+DimPlot(stromal.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(stromal.r3, ndims = 50)
+stromal.r3 = FindNeighbors(stromal.r3, dims = 1:15, k.param = 30)
+stromal.r3 = FindClusters(stromal.r3, resolution = 0.3)
+stromal.r3 = FindClusters(stromal.r3, resolution = 0.4)
+stromal.r3 = FindClusters(stromal.r3, resolution = 0.5)
+stromal.r3 = RunUMAP(stromal.r3, dims = 1:15, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(stromal.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.3", label = TRUE) + NoLegend()
+DimPlot(stromal.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(stromal.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.5", label = TRUE) + NoLegend()
+DimPlot(stromal.r3, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(stromal.r3, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+stromal.r3 = SetIdent(stromal.r3, value = "SCT_snn_res.0.3")
+stromal.r3.all.markers.res03 = FindAllMarkers(stromal.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(stromal.r3.all.markers.res03, "stromal/stromal_r3_res03_markers.xlsx", overwrite = TRUE)
+
+# stromal.r3 = SetIdent(stromal.r3, value = "SCT_snn_res.0.4")
+# stromal.r3.all.markers.res04 = FindAllMarkers(stromal.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(stromal.r3.all.markers.res04, "stromal/stromal_r3_res04_markers.xlsx", overwrite = TRUE)
+```
+
+** We choose res = 0.3 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+stromal.cluster.names = c("SMC","Pericyte 1","Schwann 1","Pericyte 2",
+                         "Schwann 2","Oligodendrocyte","OBP SMC/Pericyte","Pcp4+Nrtn+ Stroma")
+stromal.cluster.names.order = c(0,1,3,6,7,2,4,5)+1 #we order for plotting
+stromal.palette = c("#83d55b","#1389a7","#6357b1","#59d2b7","#ceb44b","#bc4573","#bf57c7","#bf5837")
+names(stromal.palette) = stromal.cluster.names[stromal.cluster.names.order]
+```
+```{r}
+stromal.r3$cluster.names = plyr::mapvalues(stromal.r3$SCT_snn_res.0.3, from = 0:7, to = stromal.cluster.names)
+stromal.r3$cluster.names = factor(stromal.r3$cluster.names, levels = stromal.cluster.names[stromal.cluster.names.order])
+```
+
+
+# Clustering Results
+Sample by cluster breakdown
+```{r}
+stromal.r3.cluster.by.sample = stromal.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+stromal.r3.cluster.by.sample$orig.ident = factor(stromal.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(stromal.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("stromal/stromal_sample_by_cluster.pdf", height = 5, width = 4.5)
+```
+
+Replot UMAP with new names
+```{r}
+DimPlot(stromal.r3, pt.size = 0.5, group.by = "cluster.names", label = TRUE, cols = stromal.palette) + NoLegend()
+ggsave("stromal/stromal_named_UMAP.pdf", height = 6, width = 6)
+```
+
+Frequency Analysis by cluster and sample per region
+```{r}
+stromal.r3$orig.ident = factor(stromal.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+stromal.RM.freq.by.hash = CalcFreqByHashMD(metadata = stromal.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                           filename = "stromal/stromal_RM_freq_by_Hash.pdf")
+stromal.OM.freq.by.hash = CalcFreqByHashMD(metadata = stromal.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                           filename = "stromal/stromal_OM_freq_by_Hash.pdf")
+stromal.LNG.freq.by.hash = CalcFreqByHashMD(metadata = stromal.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                            filename = "stromal/stromal_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+stromal.r3 = SetIdent(stromal.r3, value = "cluster.names")
+
+stromal.v3.cluster.genes = c("Acta2","Tagln","Kcnj8","Pdgfrb","Fmod","Ccl19","Obp1b","Pcp4","Nrtn","Corin",
+                             "Fabp7","Ncam1","Cldn5","Scn7a","Gfra3","Slitrk6","Mbp","Mpz","Ncmap")
+
+VlnPlot(stromal.r3, features = stromal.v3.cluster.genes, pt.size = -1, 
+        cols = stroma.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("stromal/stromal_cluster_markers_violin.pdf", height = 4, width = 8)
+```
+
+Save Seurat object
+```{r}
+saveRDS(stromal.r3, "stromal/stromal_processed.RDS", compress = FALSE)
+```

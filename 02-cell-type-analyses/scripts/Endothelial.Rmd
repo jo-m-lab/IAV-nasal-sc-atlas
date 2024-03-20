@@ -1,0 +1,299 @@
+---
+title: "Endothelial"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+** Note, some endothelial cells were in "stromal clusters", so please run Stromal.Rmd before this script**
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"endothelial"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in endothelial rds, including the endothelial cells that snuck into the stromal object
+```{r}
+endo = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/endothelial_raw.RDS")
+
+#also load in the endothelial cells that were in the stromal clusters
+endo.stromal = readRDS("stromal/stromal_endothelial.RDS")
+```
+
+Combine the two objects
+```{r}
+endo = merge(endo, endo.stromal)
+```
+
+We now reprocess the endothelial object iteratively until all multiplet/contaminating clusters have been removed
+
+# Round 1
+Remove genes not expressed in this object
+```{r}
+endo = subset(endo, features = c(rownames(endo)[which(rowSums(endo@assays$SCT@counts > 0) >= 10)], 
+                               rownames(endo[["HTO"]])))
+endo
+```
+
+Reprocessing
+```{r}
+endo = SCTransform(endo, verbose = TRUE, method = "glmGamPoi")
+endo = RunPCA(endo, verbose = TRUE)
+DimPlot(endo, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(endo, ndims = 50)
+endo = FindNeighbors(endo, dims = 1:30, k.param = 25, force.recalc = TRUE)
+#endo = FindClusters(endo, resolution = 0.4)
+endo = FindClusters(endo, resolution = 0.6)
+endo = FindClusters(endo, resolution = 0.8)
+endo = RunUMAP(endo, dims = 1:30, n.neighbors = 25)
+```
+
+Plot UMAP
+```{r}
+#DimPlot(endo, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(endo, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(endo, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(endo, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(endo, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+endo = SetIdent(endo, value = "SCT_snn_res.0.6")
+endo.all.res06.markers = FindAllMarkers(endo, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(endo.all.res06.markers, "endothelial/endo_r1_res06_markers.xlsx") #r1 = round 1
+
+# endo = SetIdent(endo, value = "SCT_snn_res.0.8")
+# endo.all.res08.markers = FindAllMarkers(endo, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(endo.all.res08.markers, "endothelial/endo_r1_res08_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+#FeaturePlot(endo, c("Omp","Epcam",""), raster = TRUE, order = TRUE)
+VlnPlot(endo, c("Omp","Epcam","Col3a1","Obp1a","Ptprc"), pt.size = -1, stack = TRUE)
+```
+Cluster 1, 8, 14 have OMP/Epcam
+Cluster 3 have Obp [leave in for now]
+Cluster 10 is SMC/Fibro
+Cluster 12 has ISGs and some cd45 [leave in for now]
+
+Now we recluster again!
+
+# Round 2
+Remove clusters 1, 8, 10, 14
+```{r}
+good.endo.r1 = c(0,2:7,9,11:13) #cluster to keep
+endo = SetIdent(endo, value = "SCT_snn_res.0.6")
+endo.r2 = subset(endo, subset = SCT_snn_res.0.6 %in% good.endo.r1)
+endo.r2 = subset(endo.r2, features = c(rownames(endo.r2)[which(rowSums(endo.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(endo.r2[["HTO"]])))
+endo.r2
+```
+
+Reprocess
+```{r}
+endo.r2 = SCTransform(endo.r2, verbose = TRUE, method = "glmGamPoi")
+endo.r2 = RunPCA(endo.r2, verbose = TRUE)
+DimPlot(endo.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(endo.r2, ndims = 50)
+endo.r2 = FindNeighbors(endo.r2, dims = 1:20, k.param = 30, force.recalc = TRUE)
+#endo.r2 = FindClusters(endo.r2, resolution = 0.6)
+endo.r2 = FindClusters(endo.r2, resolution = 0.8)
+endo.r2 = FindClusters(endo.r2, resolution = 1.0)
+endo.r2 = RunUMAP(endo.r2, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+#DimPlot(endo.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE)
+DimPlot(endo.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE)
+DimPlot(endo.r2, pt.size = 0.1, group.by = "SCT_snn_res.1", label = TRUE)
+DimPlot(endo.r2, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(endo.r2, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+# endo.r2 = SetIdent(endo.r2, value = "SCT_snn_res.0.6")
+# endo.r2.all.markers.res06 = FindAllMarkers(endo.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(endo.r2.all.markers.res06, "endo_r2_res06_markers.xlsx", overwrite = TRUE)
+
+endo.r2 = SetIdent(endo.r2, value = "SCT_snn_res.0.8")
+endo.r2.all.markers.res08 = FindAllMarkers(endo.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(endo.r2.all.markers.res08, "endothelial/endo_r2_res08_markers.xlsx", overwrite = TRUE)
+
+endo.r2 = SetIdent(endo.r2, value = "SCT_snn_res.1")
+endo.r2.all.markers.res1 = FindAllMarkers(endo.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(endo.r2.all.markers.res1, "endothelial/endo_r2_res1_markers.xlsx", overwrite = TRUE)
+```
+
+** Choosing res = 1 for more resolution **
+
+VlnPlots for contaminating genes
+```{r}
+VlnPlot(endo.r2, c("Flt1","Ptprc","Epcam","Col3a1"), pt.size = -1, stack = TRUE, group.by = "SCT_snn_res.1") + NoLegend()
+```
+
+clusters 12 and 15 are contaminants (cd45, and epcam/osn)
+
+# Round 3
+Remove doublet clusters 12 & 15 (using res=1)
+```{r}
+good.endo.r2 = c(0:11,13,14,16)
+endo.r3 = subset(endo.r2, subset = SCT_snn_res.1 %in% good.endo.r2)
+endo.r3 = subset(endo.r3, features = c(rownames(endo.r3)[which(rowSums(endo.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(endo.r3[["HTO"]])))
+endo.r3
+```
+
+Reprocess
+```{r}
+endo.r3 = SCTransform(endo.r3, verbose = TRUE, method = "glmGamPoi")
+endo.r3 = RunPCA(endo.r3, verbose = TRUE)
+DimPlot(endo.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(endo.r3, ndims = 50)
+endo.r3 = FindNeighbors(endo.r3, dims = 1:20, k.param = 30)
+#endo.r3 = FindClusters(endo.r3, resolution = 0.4)
+endo.r3 = FindClusters(endo.r3, resolution = 0.6)
+endo.r3 = FindClusters(endo.r3, resolution = 0.8)
+endo.r3 = RunUMAP(endo.r3, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+#DimPlot(endo.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(endo.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(endo.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(endo.r3, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(endo.r3, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+endo.r3 = SetIdent(endo.r3, value = "SCT_snn_res.0.6")
+endo.r3.all.markers.res06 = FindAllMarkers(endo.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(endo.r3.all.markers.res06, "endothelial/endo_r3_res06_markers.xlsx", overwrite = TRUE)
+
+#endo.r3 = SetIdent(endo.r3, value = "SCT_snn_res.0.8")
+#endo.r3.all.markers.res08 = FindAllMarkers(endo.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+#write.xlsx(endo.r3.all.markers.res08, "endothelial/endo_r3_res08_markers.xlsx", overwrite = TRUE)
+```
+
+Specific comparisons to look at differences between specific clusters
+```{r}
+endo.r3 = SetIdent(endo.r3, value = "SCT_snn_res.0.6")
+endo.0v4 = FindMarkers(endo.r3, ident.1 = 0, ident.2 = 4, logfc.threshold = 0.5, min.pct = 0.2) 
+endo.5v6 = FindMarkers(endo.r3, ident.1 = 5, ident.2 = 6, logfc.threshold = 0.5, min.pct = 0.2) 
+```
+
+Violin plot of endothelial cell subset specific genes
+```{r}
+VlnPlot(endo.r3, c("Vwf","Gpihbp1","Sema3g"), pt.size = -1, stack = TRUE) + NoLegend()
+```
+
+** USING res = 0.6 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+endo.cluster.names = c("Capillary","Dapl1+Pglyrp1+ Endo","OBP Capillary","Venular","Fabp4+ Capillary","Arteriolar","Igf1+Ptp4a3+ Endo",
+                        "Lymphatic","Rpl/s Hi Endo","MT-Hi Endo","IFN-Stim Endo","Cycling Endo")
+endo.cluster.names.order = c(0,4,2,6,5,9,3,8,1,10,7,11)+1 #we order for plotting
+endo.palette = c("#b74c59","#d84f33","#b87e40","#c8c656","#567b39","#73d452","#68d0ab","#6196d2","#3b40c4","#684ccf","#dfa0ed","#c348ca")
+names(endo.palette) = endo.cluster.names[endo.cluster.names.order]
+```
+```{r}
+endo.r3$cluster.names = plyr::mapvalues(endo.r3$SCT_snn_res.0.6, from = 0:11, to = endo.cluster.names)
+endo.r3$cluster.names = factor(endo.r3$cluster.names, levels = endo.cluster.names[endo.cluster.names.order])
+```
+
+
+# Clustering Results
+Sample by cluster breakdown
+```{r}
+endo.r3.cluster.by.sample = endo.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+endo.r3.cluster.by.sample$orig.ident = factor(endo.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(endo.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("endothelial/endo_r3_sample_by_cluster.pdf", height = 5, width = 6)
+```
+
+Replot umap with new names
+```{r}
+DimPlot(endo.r3, pt.size = 0.3, group.by = "cluster.names", label = TRUE, cols = endo.r3.palette) + NoLegend()
+ggsave("endothelial/endo_r3_named_UMAP.pdf", height = 7, width = 7)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+endo.r3$orig.ident = factor(endo.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+endo.RM.freq.by.hash = CalcFreqByHashMD(metadata = endo.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                           filename = "endothelial/endo_RM_freq_by_Hash.pdf")
+endo.OM.freq.by.hash = CalcFreqByHashMD(metadata = endo.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                           filename = "endothelial/endo_OM_freq_by_Hash.pdf")
+endo.LNG.freq.by.hash = CalcFreqByHashMD(metadata = endo.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                            filename = "endothelial/endo_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+endo.r3 = SetIdent(endo.r3, value = "cluster.names")
+
+endo.v3.cluster.genes = c("Flt1","Pecam1","Gpihbp1","Cd300lg","Mgll","Fabp4","Obp1a","Obp2a","Igf1","Ptp4a3","Sema3g",
+                          "Ptprr","Vegfc","mt-Atp6","Neat1","Vwf","Selp","Rpl30","Dapl1","Pglyrp1","Cxcl9","Cd74","Ccl21a",
+                          "Pdpn","Mki67")
+
+VlnPlot(endo.r3, features = endo.v3.cluster.genes, pt.size = -1, cols = endo.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("endothelial/endo_r3_cluster_markers_violin.pdf", height = 5, width = 10)
+```
+
+Save Seurat object
+```{r}
+saveRDS(endo.r3, "endothelial/endo_processed.RDS", compress = FALSE)
+```

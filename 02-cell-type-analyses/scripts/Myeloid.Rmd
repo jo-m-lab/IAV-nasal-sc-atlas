@@ -1,0 +1,464 @@
+---
+title: "Myeloid"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"myeloid"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in stromal object
+```{r}
+myeloid = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/myeloid_raw.RDS")
+```
+
+We now reprocess the myeloid cell object iteratively until all multiplet/contaminating clusters have been removed
+
+# Round 1
+Remove genes not expressed in this object
+```{r}
+myeloid = subset(myeloid, features = c(rownames(myeloid)[which(rowSums(myeloid@assays$SCT@counts > 0) >= 10)], 
+                               rownames(myeloid[["HTO"]])))
+myeloid
+```
+
+Reprocessing
+```{r}
+myeloid = SCTransform(myeloid, verbose = TRUE, method = "glmGamPoi")
+myeloid = RunPCA(myeloid, verbose = TRUE)
+DimPlot(myeloid, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(myeloid, ndims = 50)
+myeloid = FindNeighbors(myeloid, dims = 1:30, k.param = 30, force.recalc = TRUE)
+myeloid = FindClusters(myeloid, resolution = 0.6)
+myeloid = FindClusters(myeloid, resolution = 0.8)
+myeloid = RunUMAP(myeloid, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(myeloid, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(myeloid, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(myeloid, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(myeloid, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+myeloid = SetIdent(myeloid, value = "SCT_snn_res.0.6")
+myeloid.all.res06.markers = FindAllMarkers(myeloid, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(myeloid.all.res06.markers, "myeloid/myeloid_r1_res06_markers.xlsx") #r1 = round 1
+
+myeloid = SetIdent(myeloid, value = "SCT_snn_res.0.8")
+myeloid.all.res08.markers = FindAllMarkers(myeloid, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(myeloid.all.res08.markers, "myeloid/myeloid_r1_res08_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+VlnPlot(myeloid, c("Omp","Epcam","Col3a1","Obp1a","Ptprc"), pt.size = -1, stack = TRUE)
+```
+Cluster 7, 15, 19, 23 have OMP/Epcam
+Cluster 6, 10 have Obp [leave in 6 for now]
+Cluster 10 is OBP high and low gene capture
+Cluster 11 has Igkc
+Cluster 21 is likely Fibroblasts
+
+** Using res = 0.8 ** 
+
+# myeloid Round 2
+Remove clusters 7, 10, 11, 15, 19, 21, 23
+```{r}
+good.myeloid.r1 = c(0:6,8,9,12:14,16:18,20,22,24)
+myeloid = SetIdent(myeloid, value = "SCT_snn_res.0.8")
+myeloid.r2 = subset(myeloid, subset = SCT_snn_res.0.8 %in% good.myeloid.r1)
+myeloid.r2 = subset(myeloid.r2, features = c(rownames(myeloid.r2)[which(rowSums(myeloid.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(myeloid.r2[["HTO"]])))
+myeloid.r2
+```
+
+Reprocess
+```{r}
+myeloid.r2 = SCTransform(myeloid.r2, verbose = TRUE, method = "glmGamPoi")
+myeloid.r2 = RunPCA(myeloid.r2, verbose = TRUE)
+DimPlot(myeloid.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(myeloid.r2, ndims = 50)
+myeloid.r2 = FindNeighbors(myeloid.r2, dims = 1:30, k.param = 30, force.recalc = TRUE)
+myeloid.r2 = FindClusters(myeloid.r2, resolution = 0.6)
+myeloid.r2 = FindClusters(myeloid.r2, resolution = 0.8)
+myeloid.r2 = RunUMAP(myeloid.r2, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(myeloid.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(myeloid.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(myeloid.r2, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(myeloid.r2, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+myeloid.r2 = SetIdent(myeloid.r2, value = "SCT_snn_res.0.6")
+myeloid.r2.all.markers.res06 = FindAllMarkers(myeloid.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(myeloid.r2.all.markers.res06, "myeloid/myeloid_r2_res06_markers.xlsx", overwrite = TRUE)
+
+myeloid.r2 = SetIdent(myeloid.r2, value = "SCT_snn_res.0.8")
+myeloid.r2.all.markers.res08 = FindAllMarkers(myeloid.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(myeloid.r2.all.markers.res08, "myeloid/myeloid_r2_res08_markers.xlsx", overwrite = TRUE)
+```
+
+** Choosing res = 0.8 for more resolution **
+
+Specific comparisons to look at similar clusters
+```{r}
+myeloid.r2 = SetIdent(myeloid.r2, value = "SCT_snn_res.0.8")
+myeloid.5v7 = FindMarkers(myeloid.r2, ident.1 = 5, ident.2 = 7, logfc.threshold = 0.5, min.pct = 0.2)
+myeloid.14v15 = FindMarkers(myeloid.r2, ident.1 = 14, ident.2 = 15, logfc.threshold = 0.5, min.pct = 0.2)
+myeloid.10v18 = FindMarkers(myeloid.r2, ident.1 = 10, ident.2 = 18, logfc.threshold = 0.5, min.pct = 0.2)
+
+```
+
+VlnPlots of some myeloid markers and epcam
+```{r}
+VlnPlot(myeloid.r2, c("Ccr2","Cd74","Dcstamp","Epcam"), pt.size = -1, stack = TRUE) + NoLegend()
+```
+
+Cluster 16 and 19 have Epcam expression
+One more round of reclustering
+
+# myeloid Round 3
+Remove doublet clusters 16 & 19 (using res=0.8)
+```{r}
+good.myeloid.r2 = c(0:15,17,18,20,21)
+myeloid.r3 = subset(myeloid.r2, subset = SCT_snn_res.0.8 %in% good.myeloid.r2)
+myeloid.r3 = subset(myeloid.r3, features = c(rownames(myeloid.r3)[which(rowSums(myeloid.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(myeloid.r3[["HTO"]])))
+myeloid.r3
+```
+
+Reprocess
+```{r}
+myeloid.r3 = SCTransform(myeloid.r3, verbose = TRUE, method = "glmGamPoi")
+myeloid.r3 = RunPCA(myeloid.r3, verbose = TRUE)
+DimPlot(myeloid.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(myeloid.r3, ndims = 50)
+myeloid.r3 = FindNeighbors(myeloid.r3, dims = 1:30, k.param = 30)
+myeloid.r3 = FindClusters(myeloid.r3, resolution = 0.6)
+myeloid.r3 = FindClusters(myeloid.r3, resolution = 0.8)
+myeloid.r3 = RunUMAP(myeloid.r3, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(myeloid.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(myeloid.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(myeloid.r3, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(myeloid.r3, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+myeloid.r3 = SetIdent(myeloid.r3, value = "SCT_snn_res.0.6")
+myeloid.r3.all.markers.res06 = FindAllMarkers(myeloid.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(myeloid.r3.all.markers.res06, "myeloid/myeloid_r3_res06_markers.xlsx", overwrite = TRUE)
+
+#myeloid.r3 = SetIdent(myeloid.r3, value = "SCT_snn_res.0.8")
+#myeloid.r3.all.markers.res08 = FindAllMarkers(myeloid.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+#write.xlsx(myeloid.r3.all.markers.res08, "myeloid/myeloid_r3_res08_markers.xlsx", overwrite = TRUE)
+```
+
+Specific comparisons to look at similar clusters
+```{r}
+myeloid.12v16 = FindMarkers(myeloid.r3, ident.1 = 12, ident.2 = 16, logfc.threshold = 0.5, min.pct = 0.2) 
+```
+
+** USING res = 0.6 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+myeloid.cluster.names = c("MHC-II Hi Mac","Fcrls+Trem2+ Mac","Classical Mono","DC-SIGN+4-1BB+ DC","Ccl7+Ccl8 Mac","IFN-Stim Mono",
+                      "OBP Macrophage","IFN-Stim MDM","Non-Classical Mono","Cxcl2+MCH-II-Hi Mac","Cycling Myeloid","pDC",
+                      "Dcstamp+EpCAM+ DC","Ccr7+Ccl22+ DC","MT-Hi Mac","Cd103+ DC","Ccr3+ Mac","Osteoclast")
+myeloid.cluster.names.order = c(13,15,3,12,11,4,9,10,1,7,0,14,6,2,5,8,16,17)+1
+myeloid.r3.palette = c("#d73b62","#d9787a","#d83c3c","#98391f","#dc5f2d","#a8bd72","#94ca40","#29631f","#49a23d"
+                   ,"#61d476","#42895a","#5dc89e","#44c7cf","#3a427d","#a3a1e4","#3b44a6","#7b9631","#4ea8d9")
+names(myeloid.r3.palette) = myeloid.cluster.names[myeloid.cluster.names.order]
+```
+```{r}
+myeloid.r3$cluster.names = plyr::mapvalues(myeloid.r3$SCT_snn_res.0.6, from = 0:17, to = myeloid.cluster.names)
+myeloid.r3$cluster.names = factor(myeloid.r3$cluster.names, levels = myeloid.cluster.names[myeloid.cluster.names.order])
+```
+
+# Clustering Results
+Sample by cluster
+```{r}
+myeloid.r3.cluster.by.sample = myeloid.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+myeloid.r3.cluster.by.sample$orig.ident = factor(myeloid.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(myeloid.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("myeloid/myeloid_r3_sample_by_cluster.pdf", height = 5, width = 7)
+```
+
+Replot umap with new names
+```{r}
+DimPlot(myeloid.r3, pt.size = 0.1, group.by = "cluster.names", label = TRUE, cols = myeloid.r3.palette) + NoLegend()
+ggsave("myeloid/myeloid_r3_named_UMAP.pdf", height = 7, width = 7)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+myeloid.r3$orig.ident = factor(myeloid.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+myeloid.RM.freq.by.hash = CalcFreqByHashMD(metadata = myeloid.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 15, plot.width = 10, plot.ncol = 5, 
+                                           filename = "myeloid/myeloid_RM_freq_by_Hash.pdf")
+myeloid.OM.freq.by.hash = CalcFreqByHashMD(metadata = myeloid.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 15, plot.width = 10, plot.ncol = 5, 
+                                           filename = "myeloid/myeloid_OM_freq_by_Hash.pdf")
+myeloid.LNG.freq.by.hash = CalcFreqByHashMD(metadata = myeloid.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 15, plot.width = 10, plot.ncol = 5, 
+                                            filename = "myeloid/myeloid_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+myeloid.r3 = SetIdent(myeloid.r3, value = "cluster.names")
+
+myev3.cluster.genes = c("Lyz2","Cd74","Ccr7","Ccl22","Xcr1","Itgae","Cd209a","Tnfsf9","Dcstamp","Epcam","Siglech","Irf8","Ccl7","Ccl8","Cxcl2",
+                        "Tnfaip3","Mki67","Top2a","Fcrls","Trem2","Ifitm3","Cxcl9","H2-Aa","C1qb","mt-Co2","Obp1a","Ccr2","Ly6c2","Ifit3",
+                        "Isg15","Ace","Itgal","Ccr3","Itgad","Ctsk","Mmp9")
+
+VlnPlot(myeloid.r3, features = myev3.cluster.genes, pt.size = -1, cols = myeloid.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("myeloid/myeloid_r3_cluster_markers_violin.pdf", height = 7, width = 12)
+```
+
+Save Seurat Object
+```{r}
+saveRDS(myeloid.r3, "myeloid/myeloid_processed.RDS", compress = FALSE)
+```
+
+
+# Additional Analyses and Plots
+## 1. IAV read analysis
+Plot flu transcripts per cluster
+```{r}
+VlnPlot(myeloid.r3, features = c("PR8.SCT.total"), group.by = "cluster.names", pt.size = 0.1, raster = TRUE) + NoLegend()
+ggsave("myeloidmyeloid_r3_PR8_count_vln.pdf", height = 5, width = 7)
+```
+
+Plot total viral counts per cell over each timepoint/region
+```{r}
+PR8.counts.table = myeloid.r3@meta.data %>% select(orig.ident,assignment,timepoint,region,cluster.names,PR8.SCT.total)
+PR8.counts.table$orig.ident = factor(PR8.counts.table$orig.ident, levels = names(sample.palette))
+PR8.positivity.table = PR8.counts.table %>% group_by(orig.ident, assignment) %>% summarise(pos.events = sum(PR8.SCT.total > 0))
+PR8.positivity.table.nounknown = PR8.positivity.table[PR8.positivity.table$assignment != "",]
+
+# Here we plot including the unassigned cells as a separate sample replicate (per timepoint/region)
+ggplot(PR8.positivity.table, aes(x=orig.ident, y = log2(pos.events+1), col = orig.ident)) + 
+  geom_bar(stat = "summary", fun = "mean", fill = "white", width = 0.6) + geom_jitter(width = 0.15, height = 0) + labs(x = "", y = "PR8+ Cells") + 
+  scale_color_manual(values = sample.palette) + guides(col = "none") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+ggsave("myeloid/myeloid_r3_PR8_cells_per_sample.pdf", height = 5, width = 6)
+
+# Here we leave out the unassigned cells
+ggplot(PR8.positivity.table.nounknown, aes(x=orig.ident, y = log2(pos.events+1), col = orig.ident)) + 
+  geom_bar(stat = "summary", fun = "mean", fill = "white", width = 0.6) + geom_jitter(width = 0.15, height = 0) + labs(x = "", y = "PR8+ Cells") + 
+  scale_color_manual(values = sample.palette) + guides(col = "none") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+ggsave("myeloid/myeloid_r3_PR8_cells_per_sample_no_unknown.pdf", height = 5, width = 6)
+```
+
+
+## 2. Differences Between IFN-Stim Clusters
+Here we compare the difference between IFN-Stim Monocytes and IFN-Stim MDM and other macrophage populations to generate the volcano plots in Figure 4G
+### IFN-Stim MDM vs IFN-Stim Mono
+Find DE markers
+```{r}
+myeloid.r3 = SetIdent(myeloid.r3, value = "cluster.names")
+IFN.DEGs = FindMarkers(myeloid.r3, ident.1 = "IFN-Stim MDM", ident.2 = "IFN-Stim Mono", logfc.threshold = 0)
+IFN.DEGs$gene = rownames(IFN.DEGs)
+```
+
+Plot Volcano (color changes and arrows added afterward)
+```{r}
+IFN.DEGs.goi = c("Ifit3","Ly6c2","Irf7","Isg20","Ifi203","Tgfbi","Fabp5","Mafb","Cxcl16","Cd63","Cxcl9","Cxcl10")
+ggplot(IFN.DEGs, aes(x=avg_log2FC, y=-log10(p_val_adj), label=gene)) + geom_point(col = "#bbbbbb") + 
+  geom_point(data=subset(IFN.DEGs,gene %in% IFN.DEGs.goi), col = "red", size = 2.5) +
+  geom_text(data=subset(IFN.DEGs,gene %in% IFN.DEGs.goi), nudge_y = 8) + geom_hline(yintercept = 1, linetype=2) + 
+  geom_vline(xintercept = 0.5, linetype=2) + geom_vline(xintercept = -0.5, linetype=2) + 
+  labs(x = "log2(FC)", y = "-log10(FDR)")
+ggsave("myeloid/IFN-Stim_MDMvMono_DE_volcano.pdf", height=5, width = 4)
+```
+
+### IFN-Stim MDM vs Other Macrophage Clusters
+Here, we compare to Cxcl2+MHC-II Hi and MHC-II Hi as the two major tissue-resident macrophage clusters
+```{r}
+IFN.Mac.DEGs = FindMarkers(myeloid.r3, ident.1 = "IFN-Stim MDM", ident.2 = c("Cxcl2+MCH-II-Hi Mac", "MHC-II Hi Mac"), 
+                           logfc.threshold = 0, max.cells.per.ident = 1500)
+IFN.Mac.DEGs$gene = rownames(IFN.Mac.DEGs)
+IFN.Mac.DEGs$p_val_adj[IFN.Mac.DEGs$p_val_adj == 0] = 1e-300 #can't have 0s
+```
+
+Plot Volcano (color changes and arrows added afterward)
+```{r}
+IFN.Mac.DEGs.goi = c("Cst3","Gbp2","Egr1","Zbp1","Isg15","Cx3cr1","Ly6c2","Cxcl9","Apoe","Ccl5","Stat1","Ccl3","Ifi30","Tgfbi","Fabp5","Nfkbiz")
+ggplot(IFN.Mac.DEGs, aes(x=avg_log2FC, y=-log10(p_val_adj), label=gene)) + geom_point(col = "#bbbbbb") + 
+  geom_point(data=subset(IFN.Mac.DEGs,gene %in% IFN.Mac.DEGs.goi), col = "red", size = 2.5) +
+  geom_text(data=subset(IFN.Mac.DEGs,gene %in% IFN.Mac.DEGs.goi), nudge_y = 10) + geom_hline(yintercept = 1, linetype=2) + 
+  geom_vline(xintercept = 0.5, linetype=2) + geom_vline(xintercept = -0.5, linetype=2) + 
+  labs(x = "log2(FC)", y = "-log10(FDR)")
+ggsave("myeloid/IFN-Stim_MDMvMHC-IIhi_volcano.pdf", height=5, width = 4)
+```
+
+
+## 3. "Infected" vs Bystander Analysis
+What is the distribution of non-zero PR8 counts? This will help guide what cutoff to use
+```{r}
+hist(myeloid.r3$PR8.SCT.total[myeloid.r3$PR8.SCT.total > 0], breaks = 20)
+myeloid.r3@meta.data %>% group_by(cluster.names) %>% summarise(gt0 = sum(PR8.SCT.total > 0), gt1 = sum(PR8.SCT.total > 1))
+```
+We will choose the cutoff to be at least 2 PR8 reads, using the PR8.status.1 column moving forward
+
+### IFN-Stim MDMs in depth
+We choose to look at IFN-Stim MDMs as the cluster containing the largest number of cells with IAV reads
+Subset and add a column noting which cells express at least 2 PR8 reads (here called PR8.status.1)
+```{r}
+myeloid.IFN_MDMs = subset(myeloid.r3, subset = cluster.names == "IFN-Stim MDM")
+myeloid.IFN_MDMs$PR8.status.1 = "bystander"
+myeloid.IFN_MDMs$PR8.status.1[myeloid.IFN_MDMs$PR8.SCT.total > 1] = "PR8.pos"
+table(myeloid.IFN_MDMs$PR8.status.1)
+```
+
+Run n=100 DE tests randomly sampling the bystander population for robustness
+```{r, warning = FALSE}
+bystander.1.samples = replicate(n = 100, simplify = FALSE, expr = sample(colnames(myeloid.IFN_MDMs)[myeloid.IFN_MDMs$PR8.status.1 == "bystander"], size = 64))
+PR8.pos.1.cells = colnames(myeloid.IFN_MDMs)[myeloid.IFN_MDMs$PR8.status.1 == "PR8.pos"]
+myeloid.IFN_MDMs = SetIdent(myeloid.IFN_MDMs, value = "PR8.status.1")
+PR8.gt1.DETests = lapply(bystander.1.samples, function(samples){
+  Sobj = subset(myeloid.IFN_MDMs, cells = c(samples, PR8.pos.1.cells))
+  DE = FindMarkers(Sobj, ident.1 = "PR8.pos", ident.2 = "bystander", group.by = "PR8.status.1", logfc.threshold = 0.25, test.use = "LR")
+  return(DE)
+})
+```
+
+Collect the conserved genes from the tables and average the test results
+```{r}
+PR8.gt1.DEGs = Reduce(intersect, lapply(PR8.gt1.DETests, rownames))
+
+PR8.gt1.DETests.ordered = lapply(PR8.gt1.DETests, function(x) {
+  df = x[PR8.gt1.DEGs, c("avg_log2FC","p_val")]
+  df$logp = -log10(df$p_val) #calculate log10 values to reduce weighting of tests with high p-values
+  return(as.matrix(df))})
+PR8.gt1.DETests.avg = as.data.frame(apply(simplify2array(PR8.gt1.DETests.ordered), 1:2, mean))
+PR8.gt1.DETests.avg$p_unlog = 10^(-PR8.gt1.DETests.avg$logp) #new p_val unlogging the average of the log(p_val)
+PR8.gt1.DETests.avg$fdr = p.adjust(PR8.gt1.DETests.avg$p_unlog, method = "fdr", n = floor(mean(sapply(PR8.gt1.DETests, dim)[1,])))
+write.xlsx(PR8.gt1.DETests.avg, file = "myeloid/IFN-Stim_MDMs_bystander_v_PR8pos_DEG_gt1.xlsx", rowNames = TRUE)
+```
+
+Visualize some DE genes
+```{r}
+VlnPlot(myeloid.IFN_MDMs, features = "PR8-HA", pt.size = 0.1, group.by = "PR8.status.1")
+VlnPlot(myeloid.IFN_MDMs, features = "Oasl1", pt.size = 0.1, group.by = "PR8.status.1")
+```
+
+To generate a heatmap, we will recalculate SCT values on all genes
+```{r}
+myeloid.IFN_MDMs = SCTransform(myeloid.IFN_MDMs, return.only.var.genes = FALSE, verbose = TRUE, method = "glmGamPoi", new.assay.name = "SCT2")
+```
+
+Cluster DE genes and then run a heatmap in Seurat
+```{r}
+PR8.gt1.DEGs.dist = amap::Dist(as.matrix(myeloid.IFN_MDMs@assays$SCT2@data[PR8.gt1.DEGs,], method = "pearson"))
+PR8.gt1.DEGs.hclust = hclust(PR8.gt1.DEGs.dist, method = "ward.D2")
+DoHeatmap(myeloid.IFN_MDMs, features = PR8.gt1.DEGs[PR8.gt1.DEGs.hclust$order], group.by = "PR8.status.1", slot = "scale.data", raster = TRUE)
+ggsave("myeloid/IFN-Stim_MDMs_bystander_v_PR8pos_DEG_gt1_scaled_heatmap.pdf", height = 6, width = 9)
+```
+
+
+## 4. Evaluating Type I and II IFN responses
+We read in ISG gene lists generated from stimulating bone marrow derived macropahges with IFNa or IFNg in vitro
+See doi:10.1073/pnas.1114981109
+Gene lists are available in this git repo
+```{r}
+Liu.IFNAo.BMM = scan("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Liu_2012_BMM_IFNA_Specific.txt", what = character()) #these are only induced by IFNA
+Liu.IFNGo.BMM = scan("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Liu_2012_BMM_IFNG_Specific.txt", what = character()) #only induced by IFNG
+Liu.IFN.shared.BMM = scan("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Liu_2012_BMM_IFNA+IFNG_Common.txt", what = character()) #induced by both
+
+Liu.IFNA.BMM = c(Liu.IFNAo.BMM, Liu.IFN.shared.BMM)
+Liu.IFNG.BMM = c(Liu.IFNGo.BMM, Liu.IFN.shared.BMM)
+```
+
+We score against the genes upregulated by IFNa and IFNg (these have overlapping genes)
+```{r}
+myeloid.r3 = AddModuleScore(myeloid.r3, features = list(Liu.IFNA.BMM), name = "Liu.IFNA.Score")
+myeloid.r3 = AddModuleScore(myeloid.r3, features = list(Liu.IFNG.BMM), name = "Liu.IFNG.Score")
+```
+
+We subset to only IFN-Stim clusters (both MDM and mono)
+```{r}
+myeloid.r3.IFN = subset(myeloid.r3, subset = cluster.names %in% c("IFN-Stim Mono","IFN-Stim MDM"))
+myeloid.r3.IFN$timepoint = factor(myeloid.r3.IFN$timepoint, levels = c("Naive", "D02", "D05", "D08", "D14")) #refactoring time for plotting
+```
+
+Look at IFNA and IFNG response scores by timepoint using a scatter plot
+Dots are colored by timepoint and shape corresponds to cluster (MDM vs Mono)
+```{r}
+IFN.Scatter.DF = data.frame(timepoint = myeloid.r3.IFN$timepoint, 
+                            cluster = myeloid.r3.IFN$cluster.names, 
+                            Liu.IFNA.Score = myeloid.r3.IFN$Liu.IFNA.Score1, 
+                            Liu.IFNG.Score = myeloid.r3.IFN$Liu.IFNG.Score1)
+
+ggplot(IFN.Scatter.DF, aes(x=Liu.IFNA.Score, y=Liu.IFNG.Score, col=timepoint, shape=cluster)) + geom_point(size = 0.7) + 
+  scale_color_manual(values = sample.palette[1:5]) + labs(x = "Liu IFNA Score", y = "Liu IFNG Score", color = "Time Point", shape = "Cluster")
+ggsave("myeloid/myeloid_IFN-Stim_ISG_Scores_Scatter.pdf", height = 3.5, width = 5.5)
+```
+
+Violin plot of a genes "specific" to either IFNa or IFNg
+```{r}
+VlnPlot(myeloid.r3.IFN, features = c("Ifit1", "Oasl1", "Slfn1", "Cxcl9", "Cxcl16", "Ifitm1"), pt.size = -1, #split.by = "cluster.names", 
+        group.by = "timepoint", cols = sample.palette[1:5])
+ggsave("myeloid/myeloid_IFN-Stim_AvG_genes_Vlns.pdf", height = 6, width = 10)
+```

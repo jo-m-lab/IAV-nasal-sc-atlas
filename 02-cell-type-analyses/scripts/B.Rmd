@@ -1,0 +1,270 @@
+---
+title: "B Cells"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"Bcell"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in stromal object
+```{r}
+B = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/Bcell_raw.RDS")
+```
+
+We now reprocess the B cell object iteratively until all multiplet/contaminating clusters have been removed
+
+
+# Round 1
+Remove genes not expressed in this object
+```{r}
+B = subset(B, features = c(rownames(B)[which(rowSums(B@assays$SCT@counts > 0) >= 10)], 
+                               rownames(B[["HTO"]])))
+B
+```
+
+Reprocessing
+```{r}
+B = SCTransform(B, verbose = TRUE, method = "glmGamPoi")
+B = RunPCA(B, verbose = TRUE)
+DimPlot(B, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(B, ndims = 50)
+B = FindNeighbors(B, dims = 1:20, k.param = 30, force.recalc = TRUE)
+#B = FindClusters(B, resolution = 0.4)
+B = FindClusters(B, resolution = 0.6)
+B = FindClusters(B, resolution = 0.8)
+B = RunUMAP(B, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+#DimPlot(B, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(B, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(B, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(B, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(B, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+# B = SetIdent(B, value = "SCT_snn_res.0.4")
+# B.all.markers.res04 = FindAllMarkers(B, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(B.all.markers.res04, "Bcell/B_r1_res04_markers.xlsx") #r1 = round 1
+
+B = SetIdent(B, value = "SCT_snn_res.0.6")
+B.all.markers.res06 = FindAllMarkers(B, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(B.all.markers.res06, "Bcell/B_r1_res06_markers.xlsx") #r1 = round 1
+
+B = SetIdent(B, value = "SCT_snn_res.0.8")
+B.all.markers.res08 = FindAllMarkers(B, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(B.all.markers.res08, "Bcell/B_r1_res08_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+VlnPlot(B, features = c("Omp","Lyz2","Epcam"), pt.size = -1, stack = TRUE)
+```
+
+Cluster 10, 13, 15 have Omp
+Cluster 15, 17, 18 have EpCam
+
+** USING RES = 0.8 **
+
+We remove the contaminating clusters and reprocess
+
+# Round 2
+Remove cluster 10, 13, 15, 17, 18
+```{r}
+B = SetIdent(B, value = "SCT_snn_res.0.8")
+B.r2 = subset(B, idents = c(0:9,11,12,14,16))
+B.r2 = subset(B.r2, features = c(rownames(B.r2)[which(rowSums(B.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(B.r2[["HTO"]])))
+B.r2
+```
+
+Reprocess
+```{r}
+B.r2 = SCTransform(B.r2, verbose = TRUE, method = "glmGamPoi")
+B.r2 = RunPCA(B.r2, verbose = TRUE)
+DimPlot(B.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+B.r2 = FindNeighbors(B.r2, dims = 1:15, k.param = 30, force.recalc = TRUE)
+B.r2 = FindClusters(B.r2, resolution = 0.5)
+B.r2 = FindClusters(B.r2, resolution = 0.6)
+B.r2 = RunUMAP(B.r2, dims = 1:15, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(B.r2, pt.size = 0.5, group.by = "SCT_snn_res.0.5", label = TRUE) + NoLegend()
+DimPlot(B.r2, pt.size = 0.5, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(B.r2, pt.size = 0.3, group.by = "orig.ident", cols = sample.palette, shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+B.r2 = SetIdent(B.r2, value = "SCT_snn_res.0.5")
+B.all.markers.res05.r2 = FindAllMarkers(B.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(B.all.markers.res05.r2, "Bcell/B_r2_res05_markers.xlsx")
+
+B.r2 = SetIdent(B.r2, value = "SCT_snn_res.0.6")
+B.all.markers.res06.r2 = FindAllMarkers(B.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(B.all.markers.res06.r2, "Bcell/B_r2_res06_markers.xlsx")
+```
+
+Lineage Vlns for contamination
+```{r}
+VlnPlot(B.r2, features = c("Cd74","Obp1a","Obp2a","Ighm","Lyz"), pt.size = -1, stack=TRUE)
+```
+
+Cluster 12 are macrophages
+** using res = 0.6 **
+
+# Round 3
+Remove cluster 12
+```{r}
+B.r2 = SetIdent(B.r2, value = "SCT_snn_res.0.6")
+B.r3 = subset(B.r2, idents = c(0:11,13))
+B.r3 = subset(B.r3, features = c(rownames(B.r3)[which(rowSums(B.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(B.r3[["HTO"]])))
+B.r3
+```
+
+Reprocess
+```{r}
+B.r3 = SCTransform(B.r3, verbose = TRUE, method = "glmGamPoi")
+B.r3 = RunPCA(B.r3, verbose = TRUE)
+DimPlot(B.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(B.r3, ndims = 50)
+B.r3 = FindNeighbors(B.r3, dims = 1:20, k.param = 30, force.recalc = TRUE)
+#B.r3 = FindClusters(B.r3, resolution = 0.3)
+B.r3 = FindClusters(B.r3, resolution = 0.4)
+B.r3 = FindClusters(B.r3, resolution = 0.5)
+B.r3 = RunUMAP(B.r3, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+#DimPlot(B.r3, pt.size = 0.5, group.by = "SCT_snn_res.0.3", label = TRUE) + NoLegend()
+DimPlot(B.r3, pt.size = 0.5, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(B.r3, pt.size = 0.5, group.by = "SCT_snn_res.0.5", label = TRUE) + NoLegend()
+DimPlot(B.r3, pt.size = 0.5, group.by = "orig.ident", cols = sample.palette)
+```
+
+Find Markers
+```{r}
+B.r3 = SetIdent(B.r3, value = "SCT_snn_res.0.4")
+B.all.markers.res04.r3 = FindAllMarkers(B.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(B.all.markers.res04.r3, "Bcell/B_r3_res04_markers.xlsx")
+```
+
+Specific comparisons to look at similar clusters
+```{r}
+B.r3.0v1 = FindMarkers(B.r3, ident.1 = 0, ident.2 = 1, logfc.threshold = 0.5, min.pct = 0.2) 
+B.r3.0_1v2 = FindMarkers(B.r3, ident.1 = c(0,1), ident.2 = 2, logfc.threshold = 0.5, min.pct = 0.2)
+```
+
+** we choose res = 0.4 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+B.cluster.names = c("Mature B 1","Mature B 2","Pre-B/Immature","Immature B","OBP+ B 1","Pre-B","OBP+ B 2","Iglc1+Iglc2+ B",
+                    "MT-Hi B","Nme1/Nme2 Hi B","Pro-B","Aicda+IgA+ B")
+B.cluster.names.order = c(10,5,2,3,7,0,1,8,9,11,4,6)+1
+B.r3.palette = c("#d568c5","#853068","#d24d74","#db4f33","#a45436","#5e8135","#85cc4a","#60ca9c","#7789d8","#d1a544","#4a3384","#8845d0")
+names(B.r3.palette) = B.cluster.names[B.cluster.names.order]
+
+B.r3$cluster.names = plyr::mapvalues(B.r3$SCT_snn_res.0.4, from = 0:11, to = B.cluster.names)
+B.r3$cluster.names = factor(B.r3$cluster.names, levels = B.cluster.names[B.cluster.names.order])
+```
+
+# Clustering Results
+Sample by cluster
+```{r}
+B.r3.cluster.by.sample = B.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+B.r3.cluster.by.sample$orig.ident = factor(B.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(B.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("Bcell/B_r3_sample_by_cluster.pdf", height = 5, width = 6)
+```
+
+Replot umap with new names
+```{r}
+DimPlot(B.r3, pt.size = 0.4, group.by = "cluster.names", label = TRUE, cols = B.r3.palette) + NoLegend()
+ggsave("Bcell/B_r3_named_UMAP.pdf", height = 6, width = 6)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+B.r3$orig.ident = factor(B.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+B.RM.freq.by.hash = CalcFreqByHashMD(metadata = B.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                           filename = "Bcell/B_RM_freq_by_Hash.pdf")
+B.OM.freq.by.hash = CalcFreqByHashMD(metadata = B.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                           filename = "Bcell/B_OM_freq_by_Hash.pdf")
+B.LNG.freq.by.hash = CalcFreqByHashMD(metadata = B.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                            filename = "Bcell/B_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+B.r3 = SetIdent(B.r3, value = "cluster.names")
+
+B.v3.cluster.genes = c("Cd79a","Dntt","Vpreb1","Il7r","Bub1b","Mki67","Sox4","Rag1","Ighd","Ms4a1","Ifi30",
+                      "Iglc1","Iglc2","Cd74","Gpr183","mt-Atp6","Nme1","C1qbp","Ighg2b","Igha","Jchain","Obp1a","Mup4")
+
+VlnPlot(B.r3, features = B.v3.cluster.genes, pt.size = -1, cols = B.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("Bcell/B_r3_cluster_markers_violin.pdf", height = 5, width = 8)
+```
+
+Save Seurat object
+```{r}
+saveRDS(B.r3, "Bcell/Bcell_processed.RDS", compress = FALSE)
+```

@@ -1,0 +1,278 @@
+---
+title: "Fibroblast"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"fibroblast"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in fibroblast object
+```{r}
+fibro = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/fibroblast_raw.RDS")
+```
+
+We now reprocess the fibroblast object iteratively until all multiplet/contaminating clusters have been removed
+
+# Round 1
+Subset
+```{r}
+fibro = subset(fibro, features = c(rownames(fibro)[which(rowSums(fibro@assays$SCT@counts > 0) >= 10)], 
+                               rownames(fibro[["HTO"]])))
+fibro
+```
+
+Reprocessing
+```{r}
+fibro = SCTransform(fibro, verbose = TRUE, method = "glmGamPoi")
+fibro = RunPCA(fibro, verbose = TRUE)
+DimPlot(fibro, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(fibro, ndims = 50)
+fibro = FindNeighbors(fibro, dims = 1:30, k.param = 30, force.recalc = TRUE)
+fibro = FindClusters(fibro, resolution = 0.4)
+fibro = FindClusters(fibro, resolution = 0.6)
+#fibro = FindClusters(fibro, resolution = 0.8)
+fibro = RunUMAP(fibro, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(fibro, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(fibro, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+#DimPlot(fibro, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(fibro, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(fibro, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+# fibro = SetIdent(fibro, value = "SCT_snn_res.0.4")
+# fibro.all.res04.markers = FindAllMarkers(fibro, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(fibro.all.res04.markers, "fibroblast/fibro_r1_res04_markers.xlsx") #r1 = round 1
+
+fibro = SetIdent(fibro, value = "SCT_snn_res.0.6")
+fibro.all.res06.markers = FindAllMarkers(fibro, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(fibro.all.res06.markers, "fibroblast/fibro_r1_res06_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+VlnPlot(fibro, c("Omp","Epcam","Pecam1","Ptprc","Obp1a"), pt.size = -1, stack = TRUE)
+```
+Cluster 0, 7, 9. 13, 14, 18, 19, 20 have OMP/Epcam (epithelial/OSN)
+Cluster 17 are immune
+
+** Using res = 0.6 **
+Now we recluster again!
+
+# Round 2
+Remove clusters 0, 7, 9, 13, 14, 17-20
+```{r}
+good.fibro.r1 = c(1:6,8,10:12,15,16)
+fibro = SetIdent(fibro, value = "SCT_snn_res.0.6")
+fibro.r2 = subset(fibro, subset = SCT_snn_res.0.6 %in% good.fibro.r1)
+fibro.r2 = subset(fibro.r2, features = c(rownames(fibro.r2)[which(rowSums(fibro.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(fibro.r2[["HTO"]])))
+fibro.r2
+```
+
+Reprocess
+```{r}
+fibro.r2 = SCTransform(fibro.r2, verbose = TRUE, method = "glmGamPoi")
+fibro.r2 = RunPCA(fibro.r2, verbose = TRUE)
+DimPlot(fibro.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(fibro.r2, ndims = 50)
+fibro.r2 = FindNeighbors(fibro.r2, dims = 1:20, k.param = 30, force.recalc = TRUE)
+fibro.r2 = FindClusters(fibro.r2, resolution = 0.4)
+fibro.r2 = FindClusters(fibro.r2, resolution = 0.6)
+fibro.r2 = RunUMAP(fibro.r2, dims = 1:20, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(fibro.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(fibro.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(fibro.r2, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(fibro.r2, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+fibro.r2 = SetIdent(fibro.r2, value = "SCT_snn_res.0.4")
+fibro.r2.all.markers.res04 = FindAllMarkers(fibro.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(fibro.r2.all.markers.res04, "fibroblast/fibro_r2_res04_markers.xlsx", overwrite = TRUE)
+
+fibro.r2 = SetIdent(fibro.r2, value = "SCT_snn_res.0.6")
+fibro.r2.all.markers.res06 = FindAllMarkers(fibro.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(fibro.r2.all.markers.res06, "fibroblast/fibro_r2_res06_markers.xlsx", overwrite = TRUE)
+```
+
+Violin plots
+```{r}
+VlnPlot(fibro.r2, c("Omp","Epcam","Pecam1","Ptprc","Obp1a"), pt.size = -1, stack = TRUE)
+```
+
+Cluster 13 are multiplets
+** Choosing res = 0.6**
+
+Recluster once more.
+
+# Round 3
+Remove cluster 13 using res = 0.6
+```{r}
+good.fibro.r2 = c(0:12)
+fibro.r3 = subset(fibro.r2, subset = SCT_snn_res.0.6 %in% good.fibro.r2)
+fibro.r3 = subset(fibro.r3, features = c(rownames(fibro.r3)[which(rowSums(fibro.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(fibro.r3[["HTO"]])))
+fibro.r3
+```
+
+Reprocess
+```{r}
+fibro.r3 = SCTransform(fibro.r3, verbose = TRUE, method = "glmGamPoi")
+fibro.r3 = RunPCA(fibro.r3, verbose = TRUE)
+DimPlot(fibro.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(fibro.r3, ndims = 50)
+fibro.r3 = FindNeighbors(fibro.r3, dims = 1:25, k.param = 30)
+fibro.r3 = FindClusters(fibro.r3, resolution = 0.4)
+fibro.r3 = FindClusters(fibro.r3, resolution = 0.6)
+fibro.r3 = RunUMAP(fibro.r3, dims = 1:25, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(fibro.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(fibro.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(fibro.r3, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(fibro.r3, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+fibro.r3 = SetIdent(fibro.r3, value = "SCT_snn_res.0.6")
+fibro.r3.all.markers.res06 = FindAllMarkers(fibro.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(fibro.r3.all.markers.res06, "fibroblast/fibro_r3_res06_markers.xlsx", overwrite = TRUE)
+
+# fibro.r3 = SetIdent(fibro.r3, value = "SCT_snn_res.0.4")
+# fibro.r3.all.markers.res04 = FindAllMarkers(fibro.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+# write.xlsx(fibro.r3.all.markers.res04, "fibroblast/fibro_r3_res04_markers.xlsx", overwrite = TRUE)
+```
+
+Specific comparisons to understand similar clusters
+```{r}
+fibro.r3 = SetIdent(fibro.r3, value = "SCT_snn_res.0.6")
+fibro.r3.5v7 = FindMarkers(fibro.r3, ident.1 = 5, ident.2 = 7, logfc.threshold = 0.5, min.pct = 0.2)
+```
+
+VlnPlots of fibroblast defining genes
+```{r}
+VlnPlot(fibro.r3, c("Pdpn","Col1a1"), pt.size = -1, stack = TRUE)
+```
+
+** USING res = 0.6 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+fibro.cluster.names = c("Osr1+Cd34+ Fibro","S1pr1+Mmp13+ Fibro","Crabp1+Mecom+ Fibro","Bglap+ (Osteoblast)","Chondrocyte","Gdf10+Il11ra1+ Fibro",
+                        "Akap12+Itih5+ Fibro","Angpt2+Tmem132c+ Fibro","Hgf+Wnt6+ Fibro","OBP+ Fibro","MT-Hi Fibro","IFN-Stim Fibro","Megf10+Dmp1+ Fibro")
+fibro.cluster.names.order = c(0,5,2,9,7,6,8,10,11,1,3,12,4)+1
+fibro.r3.palette = c("#c54c6f","#6d0000","#de9744","#917328","#c9c94f","#7cd647","#037b34","#4cd8bf","#7698ff","#1951c1","#7948cd","#723a86","#d45bc2")
+names(fibro.r3.palette) = fibro.cluster.names[fibro.cluster.names.order]
+```
+```{r}
+fibro.r3$cluster.names = plyr::mapvalues(fibro.r3$SCT_snn_res.0.6, from = 0:12, to = fibro.cluster.names)
+fibro.r3$cluster.names = factor(fibro.r3$cluster.names, levels = fibro.cluster.names[fibro.cluster.names.order])
+```
+
+
+# Clustering Results
+Sample by cluster breakdown
+```{r}
+fibro.r3.cluster.by.sample = fibro.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+fibro.r3.cluster.by.sample$orig.ident = factor(fibro.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(fibro.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("fibroblast/fibro_r3_sample_by_cluster.pdf", height = 5, width = 6)
+```
+
+Replot UMAP with new names
+```{r}
+DimPlot(fibro.r3, pt.size = 0.3, group.by = "cluster.names", label = TRUE, cols = fibro.r3.palette) + NoLegend()
+ggsave("fibroblast/fibro_r3_named_UMAP.pdf", height = 7, width = 7)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+fibro.r3$orig.ident = factor(fibro.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+fibro.RM.freq.by.hash = CalcFreqByHashMD(metadata = fibro.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                           filename = "fibroblast/fibro_RM_freq_by_Hash.pdf")
+fibro.OM.freq.by.hash = CalcFreqByHashMD(metadata = fibro.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                           filename = "fibroblast/fibro_OM_freq_by_Hash.pdf")
+fibro.LNG.freq.by.hash = CalcFreqByHashMD(metadata = fibro.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 12, plot.width = 10, plot.ncol = 5, 
+                                            filename = "fibroblast/fibro_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+fibro.r3 = SetIdent(fibro.r3, value = "cluster.names")
+
+fibrov3.cluster.genes = c("Col1a1","Osr1","Cd34","Il11ra1","Gdf10","Cldn11","Crabp1","Mecom","Obp2a","Angpt2","Tmem132c","Akap12","Itih5","Hgf","Wnt6",
+                          "mt-Atp6","Neat1","Cxcl9","Gbp3","Gpx3","S1pr1","Mmp13","Bglap","Car3","Ifitm5","Megf10","Dmp1","Il12a","Cytl1","Col2a1","Chad")
+
+VlnPlot(fibro.r3, features = fibrov3.cluster.genes, pt.size = -1, cols = fibro.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("fibroblast/fibro_r3_cluster_markers_violin.pdf", height = 5, width = 10)
+```
+
+Save Seurat object
+```{r}
+saveRDS(fibro.r3, "fibroblast/fibro_processed.RDS", compress = FALSE)
+```

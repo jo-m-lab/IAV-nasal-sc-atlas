@@ -1,0 +1,524 @@
+---
+title: "Epithelial"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"epithelial"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in stromal object
+```{r}
+epi = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/epithelial_raw.RDS")
+```
+
+We now reprocess the epithelial object iteratively until all multiplet/contaminating clusters have been removed
+
+
+# Round 1
+Remove genes not expressed in this object
+```{r}
+epi = subset(epi, features = c(rownames(epi)[which(rowSums(epi@assays$SCT@counts > 0) >= 10)], 
+                               rownames(epi[["HTO"]])))
+epi
+```
+
+Reprocessing
+```{r}
+epi = SCTransform(epi, verbose = TRUE, method = "glmGamPoi")
+epi = RunPCA(epi, verbose = TRUE)
+DimPlot(epi, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(epi, ndims = 50)
+epi = FindNeighbors(epi, dims = 1:35, k.param = 30, force.recalc = TRUE)
+epi = FindClusters(epi, resolution = 0.6)
+epi = RunUMAP(epi, dims = 1:35, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(epi, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(epi, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(epi, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+epi = SetIdent(epi, value = "SCT_snn_res.0.6")
+epi.all.markers = FindAllMarkers(epi, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(epi.all.markers, "epithelial/epi_r1_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+VlnPlot(epi, "Krt5", pt.size = -1)
+```
+
+Clusters 9, 15, 17, 19, and 26 all have OSN and neutrophil genes
+Cluster 20 are macrophage doublets
+
+** Using res = 0.6 **
+Now we recluster after removing the contaminant clusters
+
+# Epithelial Round 2
+Remove clusters 9, 13, 17, 19, 20, 26
+```{r}
+good.epi.r1 = c(0:8,10:12,14:16,18,21:25,27:33)
+epi.r2 = subset(epi, subset = SCT_snn_res.0.6 %in% good.epi.r1)
+epi.r2 = subset(epi.r2, features = c(rownames(epi.r2)[which(rowSums(epi.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(epi.r2[["HTO"]])))
+epi.r2
+```
+
+Reprocess
+```{r}
+epi.r2 = SCTransform(epi.r2, verbose = TRUE, method = "glmGamPoi")
+epi.r2 = RunPCA(epi.r2, verbose = TRUE)
+DimPlot(epi.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(epi.r2, ndims = 50)
+epi.r2 = FindNeighbors(epi.r2, dims = 1:30, k.param = 30)
+epi.r2 = FindClusters(epi.r2, resolution = 0.6)
+epi.r2 = FindClusters(epi.r2, resolution = 0.8)
+epi.r2 = RunUMAP(epi.r2, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(epi.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(epi.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(epi.r2, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(epi.r2, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+epi.r2 = SetIdent(epi.r2, value = "SCT_snn_res.0.6")
+epi.r2.all.markers.res06 = FindAllMarkers(epi.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(epi.r2.all.markers.res06, "epithelial/epi_r2_res06_markers.xlsx", overwrite = TRUE)
+
+epi.r2 = SetIdent(epi.r2, value = "SCT_snn_res.0.8")
+epi.r2.all.markers.res08 = FindAllMarkers(epi.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(epi.r2.all.markers.res08, "epithelial/epi_r2_res08_markers.xlsx", overwrite = TRUE)
+```
+
+** Choosing res = 0.8 for more resolution **
+
+Specific  to clarify similar clusters
+```{r}
+epi.0v8 = FindMarkers(epi.r2, ident.1 = 0, ident.2 = 8, logfc.threshold = 0.5, min.pct = 0.2) 
+epi.12v15 = FindMarkers(epi.r2, ident.1 = 12, ident.2 = 15, logfc.threshold = 0.5, min.pct = 0.2) 
+epi.4v21 = FindMarkers(epi.r2, ident.1 = 4, ident.2 = 21, logfc.threshold = 0.5, min.pct = 0.2) 
+epi.2v26 = FindMarkers(epi.r2, ident.1 = 2, ident.2 = 26, logfc.threshold = 0.5, min.pct = 0.2) 
+epi.2v27 = FindMarkers(epi.r2, ident.1 = 2, ident.2 = 27, logfc.threshold = 0.5, min.pct = 0.2) 
+epi.4_21v30 = FindMarkers(epi.r2, ident.1 = c(4,21), ident.2 = 30, logfc.threshold = 0.5, min.pct = 0.2) 
+epi.2v31 = FindMarkers(epi.r2, ident.1 = 2, ident.2 = 31, logfc.threshold = 0.5, min.pct = 0.2) 
+```
+
+VlnPlots for contamination/doublets
+```{r}
+VlnPlot(epi.r2, c("Omp","Coch","Cftr","Dclk1","Sec14l2"), pt.size = -1) + NoLegend()
+```
+
+Cluster 25 & 26 are OSN contaminants
+Clusters 30 and 34 are epithelial cell doublets
+Clusters 31 and 32 are strongly enriched for OBP genes
+
+Final round of reclustering using res = 0.8
+
+# Epithelial Round 3
+Remove clusters 25, 26, 30-32, 34
+```{r}
+good.epi.r2 = c(0:24,27:29)
+epi.r3 = subset(epi.r2, subset = SCT_snn_res.0.8 %in% good.epi.r2)
+epi.r3 = subset(epi.r3, features = c(rownames(epi.r3)[which(rowSums(epi.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(epi.r3[["HTO"]])))
+epi.r3
+```
+
+Reprocess
+```{r}
+epi.r3 = SCTransform(epi.r3, verbose = TRUE, method = "glmGamPoi")
+epi.r3 = RunPCA(epi.r3, verbose = TRUE)
+DimPlot(epi.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(epi.r3, ndims = 50)
+epi.r3 = FindNeighbors(epi.r3, dims = 1:30, k.param = 30)
+epi.r3 = FindClusters(epi.r3, resolution = 0.6)
+epi.r3 = FindClusters(epi.r3, resolution = 0.8)
+epi.r3 = RunUMAP(epi.r3, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(epi.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(epi.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(epi.r3, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(epi.r3, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+epi.r3 = SetIdent(epi.r3, value = "SCT_snn_res.0.6")
+epi.r3.all.markers.res06 = FindAllMarkers(epi.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(epi.r3.all.markers.res06, "epithelial/epi_r3_res06_markers.xlsx", overwrite = TRUE)
+
+epi.r3 = SetIdent(epi.r3, value = "SCT_snn_res.0.8")
+epi.r3.all.markers.res08 = FindAllMarkers(epi.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(epi.r3.all.markers.res08, "epithelial/epi_r3_res08_markers.xlsx", overwrite = TRUE)
+```
+
+Specific comparisons for clarity
+```{r}
+epi.12v16 = FindMarkers(epi.r3, ident.1 = 12, ident.2 = 16, logfc.threshold = 0.5, min.pct = 0.2) 
+```
+
+** Using res = 0.8 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+epi.cluster.names = c("Igfbp2+Nrcam+ Basal","Resting Basal","Ionocyte","Abi3bp+ Resting Basal","Glandular","Sustentacular (OE)","Gp2+Lyz2+ Gob/Sec",
+                      "Dclk1+Cxcl5+ Epi","Scgb-b27+Cck+ Epi","OBP Resting Basal","Lgr6+Muc5b+ Gob/Sec","IFN-Stim Epi","Cxcl17+Ccl9+ Serous",
+                      "Nasal Tuft","Pparg+Muc5b+ Gob/Sec","Ciliated","OBP Cxcl17+Ccl9+ Serous","Emp1+Ccdc3+ Basal","Dmbt1+Ccl9+ Serous",
+                      "Gpx6+Ces1a+ Gob/Sec","Sustentacular (RE)","Cycling Basal","Krt13+Il1a+ Epi","Lgals7+Fst+ Basal","OBP Gp2+Lyz2+ Gob/Sec",
+                      "Lyz2+Cpxm2+ Ionocyte","Meg3+MHC-II+ Epi","Klk1+Fxyd2+ Epi")
+epi.cluster.names.order = c(3,21,17,11,0,23,9,1,15,12,18,16,8,4,7,6,19,10,24,14,2,25,13,27,22,26,5,20)+1
+epi.r3.palette = c("#77812c","#4d5771","#a3b4e4","#6383b0","#4b9b86","#d7a3db","#375991","#4a6445","#cf7a4a","#a7862d","#ceb6c8"
+                   ,"#684794","#d7e790","#436324","#e4af97","#98d3d2","#65919f","#cedfc1","#835676","#705447","#316465","#baad77"
+                   ,"#ce73b8","#85de97","#9f386d","#66e0c6","#be4656","#af6f6b")
+names(epi.r3.palette) = epi.cluster.names[epi.cluster.names.order]
+```
+```{r}
+epi.r3$cluster.names = plyr::mapvalues(epi.r3$SCT_snn_res.0.8, from = 0:27, to = epi.cluster.names)
+epi.r3$cluster.names = factor(epi.r3$cluster.names, levels = epi.cluster.names[epi.cluster.names.order])
+```
+
+# Clustering Results
+Sample by cluster
+```{r}
+epi.r3.cluster.by.sample = epi.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+epi.r3.cluster.by.sample$orig.ident = factor(epi.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(epi.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("epithelial/epi_r3_sample_by_cluster.pdf", height = 5, width = 9)
+```
+
+Replot umap with new names
+```{r}
+DimPlot(epi.r3, pt.size = 0.1, group.by = "cluster.names", label = TRUE, cols = epi.r3.palette) + NoLegend()
+ggsave("epithelial/epi_r3_named_UMAP.pdf", height = 8, width = 8)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+epi.r3$orig.ident = factor(epi.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+epi.RM.freq.by.hash = CalcFreqByHashMD(metadata = epi.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 20, plot.width = 10, plot.ncol = 5, 
+                                           filename = "epithelial/epi_RM_freq_by_Hash.pdf")
+epi.OM.freq.by.hash = CalcFreqByHashMD(metadata = epi.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 20, plot.width = 10, plot.ncol = 5, 
+                                           filename = "epithelial/epi_OM_freq_by_Hash.pdf")
+epi.LNG.freq.by.hash = CalcFreqByHashMD(metadata = epi.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 20, plot.width = 10, plot.ncol = 5, 
+                                            filename = "epithelial/epi_LNG_freq_by_Hash.pdf")
+```
+
+Big Violin Plot of Cluster Defining Genes (Figure S3A)
+```{r}
+epi.r3 = SetIdent(epi.r3, value = "cluster.names")
+
+epi.v3.cluster.genes = c("Epcam","Krt5","Abi3bp","Sult1d1","Mki67","Top2a","Emp1","Ccdc3","Isg15","Irf7","Igfbp2","Nrcam","Lgals7","Fst",
+                        "Obp1a","Mup4","Defb1","Dnah5","Foxj1","Cxcl17","Ccl9","Dmbt1","Scgb2b27","Cck","Bpifb9b","Odam","Dclk1","Cxcl5",
+                        "Lyz2","Gp2","Gpx6","Ces1a","Muc5b","Lgr6","Bpifa1","Pparg","Coch","Cftr","Cpxm2","Lrmp","Il25","Klk1","Fxyd2",
+                        "Krt13","Il1a","Meg3","Cd74","Sec14l3","Cyp2g1","Muc2","Acsm4")
+
+VlnPlot(epi.r3, features = epi.v3.cluster.genes, pt.size = -1, cols = epi.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("epithelial/epi_r3_cluster_markers_violin.pdf", height = 8, width = 16)
+```
+
+Smaller Violin plot of epithelial cell subset genes (Figure 3B)
+```{r}
+epi.v3.subset.genes = c("Epcam","Krt5","Mki67","Isg15","Foxj1","Ltf","Scgb2b27","Bpifb9b","Dclk1","Reg3g","Selenom",
+                        "Scgb1c1","Cftr","Trpm5","Klk1","Krt13","Meg3","Sec14l3")
+VlnPlot(epi.r3, features = epi.v3.subset.genes, pt.size = -1, cols = epi.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("epithelial/epi_r3_subset_markers_violin.pdf", height = 8, width = 9)
+```
+
+Save Seurat Object
+```{r}
+saveRDS(epi.r3, "epithelial/epithelial_processed.RDS", compress = FALSE)
+```
+
+
+# Additional Analyses and Plots
+## 1. IAV read analysis
+Plot flu transcripts per cluster
+```{r}
+VlnPlot(epi.r3, features = c("PR8.SCT.total"), group.by = "cluster.names", pt.size = 0.1, raster = TRUE) + NoLegend()
+ggsave("epithelial/epi_r3_PR8_count_vln.pdf", height = 5, width = 8)
+```
+
+Plot total viral counts per cell over each timepoint/tissue
+```{r}
+PR8.counts.table = epi.r3@meta.data %>% select(orig.ident,assignment,timepoint,region,cluster.names,PR8.SCT.total)
+PR8.counts.table$orig.ident = factor(PR8.counts.table$orig.ident, levels = names(sample.palette))
+PR8.positivity.table = PR8.counts.table %>% group_by(orig.ident, assignment) %>% summarise(pos.events = sum(PR8.SCT.total > 0))
+PR8.positivity.table.nounknown = PR8.positivity.table[PR8.positivity.table$assignment != "",]
+
+# Here we plot including the unassigned cells as a separate sample replicate (per timepoint/region)
+ggplot(PR8.positivity.table, aes(x=orig.ident, y = log2(pos.events+1), col = orig.ident)) + 
+  geom_bar(stat = "summary", fun = "mean", fill = "white", width = 0.6) + geom_jitter(width = 0.15, height = 0) + labs(x = "", y = "PR8+ Cells") + 
+  scale_color_manual(values = sample.palette) + guides(col = "none") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+ggsave("epithelial/epi_r3_PR8_cells_per_sample.pdf", height = 5, width = 6)
+
+# Here we leave out the unassigned cells
+ggplot(PR8.positivity.table.nounknown, aes(x=orig.ident, y = log2(pos.events+1), col = orig.ident)) + 
+  geom_bar(stat = "summary", fun = "mean", fill = "white", width = 0.6) + geom_jitter(width = 0.15, height = 0) + labs(x = "", y = "PR8+ Cells") + 
+  scale_color_manual(values = sample.palette) + guides(col = "none") + theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+ggsave("epithelial/epi_r3_PR8_cells_per_sample_no_unknown.pdf", height = 5, width = 6)
+```
+
+
+
+## 2. Bystander vs PR8+ Analysis
+What is the distribution of non-zero PR8 counts? This will help guide what cutoff to use
+```{r}
+hist(epi.r3$PR8.SCT.total[epi.r3$PR8.SCT.total > 0], breaks = 20)
+epi.r3@meta.data %>% group_by(cluster.names) %>% summarise(gt0 = sum(PR8.SCT.total > 0), gt1 = sum(PR8.SCT.total > 1))
+```
+We will choose the cutoff to be at least 2 PR8 reads, using the PR8.status.1 column moving forward
+
+### IFN-Stim Epithelial Cells in depth
+We choose to look at IFN-Stim Epi as the cluster containing the largest number of cells with IAV reads
+Subset and add a column noting which cells express at least 2 PR8 reads (here called PR8.status.1)
+```{r}
+epi.IFN = subset(epi.r3, subset = cluster.names == "IFN-Stim Epi")
+epi.IFN$PR8.status.1 = "bystander"
+epi.IFN$PR8.status.1[epi.IFN$PR8.SCT.total > 1] = "PR8.pos"
+table(epi.IFN$PR8.status.1)
+```
+
+Run n=100 DE tests randomly sampling the bystander population for robustness
+```{r, warning = FALSE}
+bystander.1.samples = replicate(n = 100, simplify = FALSE, expr = sample(colnames(epi.IFN)[epi.IFN$PR8.status.1 == "bystander"], size = 104))
+PR8.pos.1.cells = colnames(epi.IFN)[epi.IFN$PR8.status.1 == "PR8.pos"]
+epi.IFN = SetIdent(epi.IFN, value = "PR8.status.1")
+PR8.gt1.DETests = lapply(bystander.1.samples, function(samples){
+  Sobj = subset(epi.IFN, cells = c(samples, PR8.pos.1.cells))
+  DE = FindMarkers(Sobj, ident.1 = "PR8.pos", ident.2 = "bystander", group.by = "PR8.status.1", logfc.threshold = 0.25, test.use = "LR")
+  return(DE)
+})
+```
+
+Collect the conserved genes from the tables and average the test results
+```{r}
+PR8.gt1.DEGs = Reduce(intersect, lapply(PR8.gt1.DETests, rownames))
+
+PR8.gt1.DETests.ordered = lapply(PR8.gt1.DETests, function(x) {
+  df = x[PR8.gt1.DEGs, c("avg_log2FC","p_val")]
+  df$logp = -log10(df$p_val) #calculate log10 values to reduce weighting of tests with high p-values
+  return(as.matrix(df))})
+PR8.gt1.DETests.avg = as.data.frame(apply(simplify2array(PR8.gt1.DETests.ordered), 1:2, mean))
+PR8.gt1.DETests.avg$p_unlog = 10^(-PR8.gt1.DETests.avg$logp) #new p_val unlogging the average of the log(p_val)
+PR8.gt1.DETests.avg$fdr = p.adjust(PR8.gt1.DETests.avg$p_unlog, method = "fdr", n = floor(mean(sapply(PR8.gt1.DETests, dim)[1,])))
+write.xlsx(PR8.gt1.DETests.avg, file = "epithelial/IFN-Stim_bystander_v_PR8pos_DEG_gt1.xlsx", rowNames = TRUE)
+```
+
+Visualize some of the DE genes
+```{r}
+VlnPlot(epi.IFN, features = "PR8-NS2", pt.size = 0.1, group.by = "PR8.status.1")
+VlnPlot(epi.IFN, features = "Oasl1", pt.size = 0.1, group.by = "PR8.status.1")
+```
+
+To generate a heatmap, we will recalculate SCT values on all genes
+```{r}
+epi.IFN = SCTransform(epi.IFN, return.only.var.genes = FALSE, verbose = TRUE, method = "glmGamPoi", new.assay.name = "SCT2")
+```
+
+Cluster DE genes and then run a heatmap in Seurat
+```{r}
+PR8.gt1.DEGs.dist = amap::Dist(as.matrix(epi.IFN@assays$SCT2@data[PR8.gt1.DEGs,], method = "pearson"))
+PR8.gt1.DEGs.hclust = hclust(PR8.gt1.DEGs.dist, method = "ward.D2")
+DoHeatmap(epi.IFN, features = PR8.gt1.DEGs[PR8.gt1.DEGs.hclust$order], group.by = "PR8.status.1", slot = "scale.data", raster = TRUE)
+ggsave("epithelial/IFN-Stim_bystander_v_PR8pos_DEG_gt1_scaled_heatmap.pdf", height = 4, width = 9)
+```
+
+
+## 3. Cluster specific analysis
+### Cycling Basal Cells
+Subset to only cycling basal cells
+```{r}
+epi.r3 = SetIdent(epi.r3, value = "cluster.names")
+epi.r3.cycling = subset(epi.r3, idents = c("Cycling Basal Cells"))
+epi.r3.cycling
+table(epi.r3.cycling$timepoint) #look at the number of cells per time point
+```
+
+We're interested in what changes over time, so we calculated DE by timepoint
+```{r}
+epi.r3.cycling = SetIdent(epi.r3.cycling, value = "timepoint")
+cycling.markers.time = FindAllMarkers(object = epi.r3.cycling, logfc.threshold = 0.25, min.pct = 0.2, only.pos = TRUE, min.diff.pct = 0.1, test.use = "wilcox")
+write.xlsx(cycling.markers.time, "epithelial/cycling_timepoint_DEGs.xlsx", rowNames = TRUE)
+```
+
+Looking at the marker list, it's clear that D5 is enriched for ISGs, so we generate a heatmap of DEGs across all time points to visualize
+```{r}
+cycling.DEGs = unique(cycling.markers.time$gene[cycling.markers.time$p_val_adj < 0.05])
+epi.r3.cycling = GetResidual(epi.r3.cycling, features = cycling.DEGs) #calculate pearson residuals for genes that didn't go through SCT
+epi.r3.cycling$timepoint = factor(epi.r3.cycling$timepoint, levels = c("Naive","D02","D05","D08","D14"))
+epi.r3.cycling = SetIdent(epi.r3.cycling, value = "timepoint")
+
+DoHeatmap(epi.r3.cycling, features = cycling.DEGs, group.by = "timepoint", slot = "scale.data", raster = TRUE)
+ggsave("epithelial/cycling_timepoint_DEGs_heatmap.pdf", height = 6, width = 7)
+```
+
+Run Pathway analysis to understand relative enrichment for IFN response and cell cycle pathways using all of the HALLMARK pathways
+```{r}
+require(hypeR)
+#Grab all marker genes from the complete epithelial cell clustering analysis
+cycling.epi.markers = scan("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/cycling_epi_markers.txt", what=character())
+
+HALLMARK = msigdb_gsets(species = "Mus musculus", category = "H")
+cycling.HALLMARK.hyper = hypeR(signature = cycling.epi.markers, genesets = HALLMARK, test = "hypergeometric", background = nrow(epi.r3))
+```
+
+Output the results of hypergeomteric test
+```{r}
+hyp_dots(cycling.HALLMARK.hyper, top = 10)
+ggsave("epithelial/cycling_markers_hyper_HALLMARK_top10.pdf", height = 5, width = 8)
+hyp_to_excel(cycling.HALLMARK.hyper, file_path = "epithelial/cycling_markers_hyper_HALLMARK_table.xlsx")
+```
+
+Score with the Interferon_Alpha_Response pathway and G2M_Checkpoint (i.e., cell cycle) pathways to look at association
+```{r}
+epi.r3.cycling = AddModuleScore(epi.r3.cycling, features = list(HALLMARK$genesets$HALLMARK_INTERFERON_ALPHA_RESPONSE), name = "Hallmark IFNa Response")
+epi.r3.cycling = AddModuleScore(epi.r3.cycling, features = list(HALLMARK$genesets$HALLMARK_G2M_CHECKPOINT), name = "Hallmark G2M Checkpoint")
+
+# Violins (these were added onto the scatter plot below for the density diagrams visualized in Figure 3G)
+VlnPlot(epi.r3.cycling, features = c("Hallmark.IFNa.Response1","Hallmark.G2M.Checkpoint1"), group.by = "timepoint", cols = sample.palette[1:5], pt.size = 0) & NoLegend()
+ggsave("epithelial/cycling_Hallmark_IFNresponse_G2M_Score_Vlns.pdf", height = 3.3, width = 6)
+
+# Scatter plot of scores
+FeatureScatter(epi.r3.cycling, feature1 = "Hallmark.G2M.Checkpoint1", feature2 = "Hallmark.IFNa.Response1", group.by = "timepoint", 
+               cols = Sample.palette[1:5], plot.cor = FALSE)
+ggsave("epithelial/Cycling_IFN_Response_vs_G2M_scores_scatter.pdf", height = 3.5, width = 4.5)
+```
+
+
+### Krt13+Il1a+
+Make new column for KNIIFE cell identity for plotting
+```{r}
+epi.r3$kniife = as.character(epi.r3$cluster.names)
+epi.r3$kniife[epi.r3$kniife != "Krt13+Il1a+"] = "other"
+epi.r3$kniife = factor(epi.r3$kniife, levels = c("Krt13+Il1a+","other"))
+```
+
+Plot key KNIIFE enriched genes
+```{r}
+epi.r3 = SetIdent(epi.r3, value = "kniife")
+VlnPlot(epi.r3, features = c("Epcam","Krt5","Krt13","Il1a","Tnf","Cd274","Cxcl16","Il1r2","Cd68","Ifngr2","Prdm1"), 
+        stack = TRUE, flip = TRUE, fill.by = "ident", cols = c(epi.r3.palette["Krt13+Il1a+"], "gray50")) + NoLegend()
+ggsave("epithelial/KNIIFE_violins_comparative.pdf", height = 5.5, width = 2.6)
+```
+
+
+### Meg3+MHC-II+ Epi
+make new column for Meg3+MHC-II+ cell identity for plotting
+```{r}
+epi.r3$meg3 = as.character(epi.r3$cluster.names)
+epi.r3$meg3[epi.r3$meg3 != "Meg3+MHC-II+"] = "other"
+epi.r3$meg3 = factor(epi.r3$meg3, levels = c("Meg3+MHC-II+","other"))
+```
+
+Plot key Meg3+MHC-II+ enriched genes
+```{r}
+epi.r3 = SetIdent(epi.r3, value = "meg3")
+VlnPlot(epi.r3, features = c("Epcam","Cd74","Sprr1a","H2-Ab1","Rian","Fezf2","Wnt5a","Agr3","Fgl2","Cxcl12","Ccl25"), stack = TRUE, flip = TRUE, 
+        fill.by = "ident", cols = c(epi.r3.palette["Meg3+MHC-II+"], "gray50")) + NoLegend()
+ggsave("Meg3_MHC-II_violins_comparative.pdf", height = 5.5, width = 2.6)
+```
+
+## 4. Evaluating Type I and II IFN responses
+We read in ISG gene lists generated from stimulating murine nasal basal cells in vitro with IFNa or IFNg
+See doi:10.1016/j.cell.2020.04.035
+Gene lists are available in this git repo
+```{r}
+Ziegler.IFNA.Basal = scan("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Ziegler_2020_mm_IFNAvUnT_Up.txt", what = character())
+Ziegler.IFNG.Basal = scan("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Ziegler_2020_mm_IFNGvUnT_Up.txt", what = character())
+```
+
+We score against the genes upregulated by IFNa and IFNg (these have overlapping genes)
+```{r}
+epi.r3 = AddModuleScore(epi.r3, features = list(Ziegler.IFNA.Basal), name = "Ziegler.IFNA.Score")
+epi.r3 = AddModuleScore(epi.r3, features = list(Ziegler.IFNG.Basal), name = "Ziegler.IFNG.Score")
+```
+
+Subset to only IFN-Stim Epi cells
+```{r}
+epi.r3.IFN = subset(epi.r3, subset = cluster.names == "IFN-Stim")
+epi.r3.IFN$timepoint = factor(epi.r3.IFN$timepoint, levels = c("Naive", "D02", "D05", "D08", "D14")) #refactoring time for plotting
+```
+
+Look at IFNA and IFNG response scores by timepoint using a scatter plot
+```{r}
+FeatureScatter(epi.r3.IFN, feature1 = "Ziegler.IFNA.Score1", feature2 = "Ziegler.IFNG.Score1", group.by = "timepoint", 
+               cols = sample.palette[1:5], plot.cor = FALSE)
+ggsave("epithelial/epi_IFN-Stim_ISG_Scores_Scatter.pdf", height = 3.5, width = 4.5)
+```
+
+What are the non-overlapping genes?
+```{r}
+Zigler.IFNG.specific = Ziegler.IFNG.Basal[!Ziegler.IFNG.Basal %in% Ziegler.IFNA.Basal]
+Zigler.IFNA.specific = Ziegler.IFNA.Basal[!Ziegler.IFNA.Basal %in% Ziegler.IFNG.Basal]
+```
+
+Plot a few of these non-overlapping genes to see if they match the expected pattern
+```{r}
+VlnPlot(epi.r3.IFN, features = c("Ifit3", "Oas1a", "Ifi44", "Gbp2", "Irf1", "Cxcl16"), pt.size = -1, 
+        group.by = "timepoint", cols = sample.palette[1:5])
+ggsave("epithelial/epi_IFN-Stim_AvG_genes_Vlns.pdf", height = 6, width = 10)
+```
+
