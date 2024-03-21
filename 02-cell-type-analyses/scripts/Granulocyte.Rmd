@@ -1,0 +1,334 @@
+--
+title: "Granulocytes"
+author: "SWK"
+date: "02/12/2024"
+output: html_document
+---
+
+## Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types")
+main.dir = getwd()
+dir.create(file.path(main.dir,"granulocyte"))
+```
+
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+```
+
+Load in stromal object
+```{r}
+granulo = readRDS("IAV-nasal-sc-atlas/01-post-cellbender/cell_type_objs/granulocyte_raw.RDS")
+```
+
+We now reprocess the granulocyte cell object iteratively until all multiplet/contaminating clusters have been removed
+
+
+# Round 1
+Remove genes not expressed in this object
+```{r}
+granulo = subset(granulo, features = c(rownames(granulo)[which(rowSums(granulo@assays$SCT@counts > 0) >= 10)], 
+                               rownames(granulo[["HTO"]])))
+granulo
+```
+
+Reprocessing
+```{r}
+granulo = SCTransform(granulo, verbose = TRUE, method = "glmGamPoi")
+granulo = RunPCA(granulo, verbose = TRUE)
+DimPlot(granulo, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(granulo, ndims = 50)
+granulo = FindNeighbors(granulo, dims = 1:30, k.param = 30, force.recalc = TRUE)
+granulo = FindClusters(granulo, resolution = 0.4)
+granulo = FindClusters(granulo, resolution = 0.6)
+#granulo = FindClusters(granulo, resolution = 0.8)
+granulo = RunUMAP(granulo, dims = 1:30, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(granulo, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(granulo, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+#DimPlot(granulo, pt.size = 0.1, group.by = "SCT_snn_res.0.8", label = TRUE) + NoLegend()
+DimPlot(granulo, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(granulo, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+granulo = SetIdent(granulo, value = "SCT_snn_res.0.4")
+granulo.all.res04.markers = FindAllMarkers(granulo, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(granulo.all.res04.markers, "granulocyte/granulo_r1_res04_markers.xlsx") #r1 = round 1
+
+granulo = SetIdent(granulo, value = "SCT_snn_res.0.6")
+granulo.all.res06.markers = FindAllMarkers(granulo, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(granulo.all.res06.markers, "granulocyte/granulo_r1_res06_markers.xlsx") #r1 = round 1
+```
+
+Vlns/FeaturePlots for contaminating markers
+```{r}
+#FeaturePlot(granulo, c("Omp","Epcam",""), raster = TRUE, order = TRUE)
+VlnPlot(granulo, c("Omp","Epcam","Col3a1","Obp1a","Ptprc"), pt.size = -1, stack = TRUE)
+```
+Cluster 4, 5 have OMP/Epcam
+Cluster 7 has Obp [leave in for now]
+Cluster 8 is macrophage doublets
+Cluster 11, 13 is epithelial doublets
+Cluster 12 is T cell doublets
+
+** Using res = 0.4 **
+
+Now we remove the contaminating clusters and reprocess
+
+# Round 2
+Remove clusters 4, 5, 7, 8, 11-13
+```{r}
+good.granulo.r1 = c(0:3,6,9,10)
+granulo = SetIdent(granulo, value = "SCT_snn_res.0.4")
+granulo.r2 = subset(granulo, subset = SCT_snn_res.0.4 %in% good.granulo.r1)
+granulo.r2 = subset(granulo.r2, features = c(rownames(granulo.r2)[which(rowSums(granulo.r2@assays$SCT@counts > 0) >= 10)], 
+                               rownames(granulo.r2[["HTO"]])))
+granulo.r2
+```
+
+Reprocess
+```{r}
+granulo.r2 = SCTransform(granulo.r2, verbose = TRUE, method = "glmGamPoi")
+granulo.r2 = RunPCA(granulo.r2, verbose = TRUE)
+DimPlot(granulo.r2, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(granulo.r2, ndims = 50)
+granulo.r2 = FindNeighbors(granulo.r2, dims = 1:15, k.param = 30, force.recalc = TRUE)
+granulo.r2 = FindClusters(granulo.r2, resolution = 0.4)
+granulo.r2 = FindClusters(granulo.r2, resolution = 0.6)
+granulo.r2 = RunUMAP(granulo.r2, dims = 1:15, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(granulo.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(granulo.r2, pt.size = 0.1, group.by = "SCT_snn_res.0.6", label = TRUE) + NoLegend()
+DimPlot(granulo.r2, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(granulo.r2, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+granulo.r2 = SetIdent(granulo.r2, value = "SCT_snn_res.0.4")
+granulo.r2.all.markers.res04 = FindAllMarkers(granulo.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(granulo.r2.all.markers.res04, "granulocyte/granulo_r2_res04_markers.xlsx", overwrite = TRUE)
+
+granulo.r2 = SetIdent(granulo.r2, value = "SCT_snn_res.0.6")
+granulo.r2.all.markers.res06 = FindAllMarkers(granulo.r2, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(granulo.r2.all.markers.res06, "granulocyte/granulo_r2_res06_markers.xlsx", overwrite = TRUE)
+```
+
+Cluster 5, 8 are a mix of OBP and hi-mito cells (low-quality cells)
+** Choosing res = 0.4**
+
+# Round 3
+Remove doublet clusters 5 & 8 (using res=0.4)
+```{r}
+good.granulo.r2 = c(0:4,6,7,9,10)
+granulo.r3 = subset(granulo.r2, subset = SCT_snn_res.0.4 %in% good.granulo.r2)
+granulo.r3 = subset(granulo.r3, features = c(rownames(granulo.r3)[which(rowSums(granulo.r3@assays$SCT@counts > 0) >= 10)], 
+                               rownames(granulo.r3[["HTO"]])))
+granulo.r3
+```
+
+Reprocess
+```{r}
+granulo.r3 = SCTransform(granulo.r3, verbose = TRUE, method = "glmGamPoi")
+granulo.r3 = RunPCA(granulo.r3, verbose = TRUE)
+DimPlot(granulo.r3, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(granulo.r3, ndims = 50)
+granulo.r3 = FindNeighbors(granulo.r3, dims = 1:15, k.param = 30)
+granulo.r3 = FindClusters(granulo.r3, resolution = 0.3)
+granulo.r3 = FindClusters(granulo.r3, resolution = 0.4)
+granulo.r3 = RunUMAP(granulo.r3, dims = 1:15, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(granulo.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.3", label = TRUE) + NoLegend()
+DimPlot(granulo.r3, pt.size = 0.1, group.by = "SCT_snn_res.0.4", label = TRUE) + NoLegend()
+DimPlot(granulo.r3, pt.size = 0.1, group.by = "orig.ident", shuffle = TRUE)
+DimPlot(granulo.r3, pt.size = 0.1, group.by = "region", shuffle = TRUE)
+```
+
+Find Markers
+```{r}
+granulo.r3 = SetIdent(granulo.r3, value = "SCT_snn_res.0.3")
+granulo.r3.all.markers.res03 = FindAllMarkers(granulo.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(granulo.r3.all.markers.res03, "granulocyte/granulo_r3_res03_markers.xlsx", overwrite = TRUE)
+
+granulo.r3 = SetIdent(granulo.r3, value = "SCT_snn_res.0.4")
+granulo.r3.all.markers.res04 = FindAllMarkers(granulo.r3, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+write.xlsx(granulo.r3.all.markers.res04, "granulocyte/granulo_r3_res04_markers.xlsx", overwrite = TRUE)
+```
+
+Specific comparisons to look at similar and nearby clusters
+```{r}
+granulo.r3 = SetIdent(granulo.r3, value = "SCT_snn_res.0.4")
+granulo.0v3 = FindMarkers(granulo.r3, ident.1 = 0, ident.2 = 3, logfc.threshold = 0.5, min.pct = 0.2) 
+granulo.2v7 = FindMarkers(granulo.r3, ident.1 = 2, ident.2 = 7, logfc.threshold = 0.5, min.pct = 0.2) 
+granulo.4v5 = FindMarkers(granulo.r3, ident.1 = 4, ident.2 = 5, logfc.threshold = 0.5, min.pct = 0.2) 
+```
+
+VlnPlots to look at some cluster markers
+```{r}
+VlnPlot(granulo.r3, c("Siglecf","Adamdec1","Itgax","Il1b","Ccl6","H2-D1","Camp"), pt.size = -1, stack = TRUE) + NoLegend()
+```
+
+** USING res = 0.4 **
+
+We then annotated clusters based on marker expression from the output above and name them in the object
+```{r}
+granulo.cluster.names = c("Dusp2+Icam1+ Mature Neu","Retnlg+Ccl6+ Immature Neu","MHC-I Hi Mature Neu","Jaml+Adamdec1+ Mature Neu","Camp++Lta4h+ Immature Neu","Camp+Il1b+ Immature Neu","Cycling Immature Neu","IFN-Stim Mature Neu","Mast Cell","Granulo Progenitor")
+granulo.cluster.names.order = c(9,6,4,5,1,2,7,0,3,8)+1
+granulo.r3.palette = c("#ddc349","#be8b4c","#d75033","#7f392b","#ca5678","#ce4dbb","#5e3c7d","#ae8cd2","#6f49c9","forestgreen")
+names(granulo.r3.palette) = granulo.cluster.names[granulo.cluster.names.order]
+```
+```{r}
+granulo.r3$cluster.names = plyr::mapvalues(granulo.r3$SCT_snn_res.0.4, from = 0:9, to = granulo.cluster.names)
+granulo.r3$cluster.names = factor(granulo.r3$cluster.names, levels = granulo.cluster.names[granulo.cluster.names.order])
+```
+
+# Clustering Results
+Sample by cluster
+```{r}
+granulo.r3.cluster.by.sample = granulo.r3@meta.data %>% group_by(cluster.names,orig.ident) %>% 
+  summarise(count = n()) %>% mutate(freq = count/sum(count))
+granulo.r3.cluster.by.sample$orig.ident = factor(granulo.r3.cluster.by.sample$orig.ident, levels = names(sample.palette))
+
+ggplot(granulo.r3.cluster.by.sample, aes(x=cluster.names, y=freq*100, fill=orig.ident)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = sample.palette) + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1)) + labs(x="", y="Proportion of Cluster (%)")
+ggsave("granulocyte/granulo_r3_sample_by_cluster.pdf", height = 5, width = 5)
+```
+
+
+Replot umap with new names
+```{r}
+DimPlot(granulo.r3, pt.size = 0.3, group.by = "cluster.names", label = TRUE, cols = granulo.r3.palette) + NoLegend()
+ggsave("granulocyte/granulo_r3_named_UMAP.pdf", height = 7, width = 7)
+```
+
+Frequency Analysis by cluster and sample
+```{r}
+granulo.r3$orig.ident = factor(granulo.r3$orig.ident, levels = names(sample.palette)) #some factor fixing for ordering
+
+granulo.RM.freq.by.hash = CalcFreqByHashMD(metadata = granulo.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "RM",
+                                           palette = sample.palette[1:5], #RM samples
+                                           plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                           filename = "granulocyte/granulo_RM_freq_by_Hash.pdf")
+granulo.OM.freq.by.hash = CalcFreqByHashMD(metadata = granulo.r3@meta.data, 
+                                           col = cluster.names, 
+                                           which.x.axis = timepoint,
+                                           roi = "OM",
+                                           palette = sample.palette[6:10], #OM samples
+                                           plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                           filename = "granulocyte/granulo_OM_freq_by_Hash.pdf")
+granulo.LNG.freq.by.hash = CalcFreqByHashMD(metadata = granulo.r3@meta.data, 
+                                            col = cluster.names, 
+                                            which.x.axis = timepoint,
+                                            roi = "LNG",
+                                            palette = sample.palette[11:15], #LNG samples
+                                            plot.height = 8, plot.width = 10, plot.ncol = 5, 
+                                            filename = "granulocyte/granulo_LNG_freq_by_Hash.pdf")
+```
+
+
+Big Violin Plot of Cluster Defining Genes
+```{r}
+granulo.r3 = SetIdent(granulo.r3, value = "cluster.names")
+
+granv3.cluster.genes = c("Lyz2","Ly6g","Elane","Mpo","Ifitm6","Camp","Mki67","Top2a","Ltf","Lta4h","Mmp8","Il1b","Retnlg","Ccl6","Csf3r","H2-D1",
+                         "Clec4d","Isg15","Ifit3","Siglecf","Itgax","Dusp2","Icam1","Jaml","Adamdec1","Il6","Gata2","Il4")
+
+VlnPlot(granulo.r3, features = granv3.cluster.genes, pt.size = -1, cols = granulo.r3.palette, stack = TRUE, fill.by = "ident") + NoLegend()
+ggsave("granulocyte/granulo_r3_cluster_markers_violin.pdf", height = 4.5, width = 10)
+```
+
+Save Seurat Object
+```{r}
+saveRDS(granulo.r3, "granulocyte/granulo_processed.RDS", compress = FALSE)
+```
+
+
+# Additional Analyses and Plots
+## 1. Plot neutrophil state genes from other published atlases
+We'll use genes from Xie 2020 Nat Immunol
+```{r}
+xie.genes = scan("IAV-nasal-sc-atlas/02-cell-type-analyses/gene-lists/Xie_gene_list.txt", what=character())
+xie.genes[8] = "Cstdc4" #fix this gene name
+granulo.r3 = SetIdent(granulo.r3, value = "cluster.names")
+neutro = subset(granulo.r3, subset = cluster.names != "Mast Cell")
+DotPlot(neutro, features = rev(xie.genes), dot.scale = 5, scale = TRUE) + theme(axis.text.x = element_text(angle = 55, hjust = 1))
+ggsave("granulocyte/neutro_Xie_genes_dotplot.pdf", height = 3.75, width = 9.5)
+```
+
+## 2. Diffusion Pseudotime Analysis
+We implement the pseudotime approach used in the Grieshaber-Bouyer neutrotime paper
+See doi: 10.1038/s41467-021-22973-9
+Note here we are using the `neutro` object from the last section which excludes mast cells
+
+First, we create a cell-to-cell distance matrix from the first 20 PCs using the Pearson correlation coefficient
+```{r}
+require(destiny)
+neutro.pcs <- cb.gran.r3.nomast@reductions$pca@cell.embeddings[,1:20]
+neutro.distance <- as.matrix(1-cor(t(neutro.pcs), method="pearson"))
+neutro.covariates <- as.data.frame(cbind(colnames(cb.gran.r3.nomast@assays$SCT@scale.data), as.character(cb.gran.r3.nomast$r3.short.names), as.character(cb.gran.r3.nomast$timepoint), as.character(cb.gran.r3.nomast$region)))
+colnames(neutro.covariates) <- c("Cell.ID","cluster.names","timepoint","region")
+```
+
+Then we calculate the diffusion map
+```{r}
+neutro.diffmap = DiffusionMap(data = cb.neu.covariates, distance = cb.neu.distance, density_norm = TRUE, rotate = TRUE)
+plot.DiffusionMap(cb.neu.diffmap, dims = 1:2, col_by = "cluster.names") # we didn't include this in the figures
+```
+
+And finally we can calculate pseudotime values
+Here, we pick 3 random cells from the Granlo Progenitor cluster to act as the tips.
+```{r}
+neutro.dpt <- DPT(cb.neu.diffmap, tips = sample(which(neutro$cluster.names == "Granulo Progenitor"), 3L))
+```
+
+Scale pseudotime values between 0-1, add to the Seurat object, and plot
+```{r}
+p <- plot(neutro.dpt)
+scaled_pseudotime <- p$data$Colour/max(p$data$Colour)
+names(scaled_pseudotime) <- rownames(neutro.pcs)
+granulo.r3$pseudotime <- scaled_pseudotime
+neutro$pseudotime <- scaled_pseudotime
+
+FeaturePlot(granulo.r3, features = "pseudotime", pt.size = 0.5) + scale_colour_continuous(type = "viridis")
+ggsave("granulocyte/granulo_pseudotime_featureplot.pdf", height = 3.5, width = 4.5)
+
+VlnPlot(neutro, features = "pseudotime", group.by = "cluster.names", cols = granulo.r3.palette, pt.size = -1) + coord_flip() +
+  theme(aspect.ratio = .75, legend.position = "none", axis.text.y = (element_text(angle=45, hjust = 1)))
+ggsave("granulocyte/neutrophil_pseudotime_violin.pdf", height = 5, width = 7)
+```
