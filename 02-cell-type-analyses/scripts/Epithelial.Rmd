@@ -290,6 +290,7 @@ ggsave("epithelial/epi_r3_subset_markers_violin.pdf", height = 8, width = 9)
 Save Seurat Object
 ```{r}
 saveRDS(epi.r3, "epithelial/epithelial_processed.RDS", compress = FALSE)
+saveRDS(epi.r3@meta.data, "epithelial/epithelial_processed_metadata.RDS", compress = FALSE)
 ```
 
 

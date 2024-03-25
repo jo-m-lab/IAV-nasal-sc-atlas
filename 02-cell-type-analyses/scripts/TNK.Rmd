@@ -279,6 +279,7 @@ ggsave("TNK/TNK_r3_cluster_markers_violin.pdf", height = 6, width = 12)
 Save Seurat object
 ```{r}
 saveRDS(TNK.r3, "TNK/TNK_processed.RDS", compress = FALSE)
+saveRDS(TNK.r3@meta.data, "TNK/TNK_processed_metadata.RDS", compress = FALSE)
 ```
 
 

@@ -223,5 +223,6 @@ ggsave("neuron/neuron_r2_cluster_markers_violin.pdf", height = 4, width = 8)
 Save Seurat object
 ```{r}
 saveRDS(neuron.r3, "neuron/neuron_processed.RDS", compress = FALSE)
+saveRDS(neuron.r3@meta.data, "neuron/neuron_processed_metadata.RDS", compress = FALSE)
 ```
 

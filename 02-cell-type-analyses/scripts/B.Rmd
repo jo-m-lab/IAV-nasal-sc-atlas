@@ -264,7 +264,8 @@ VlnPlot(B.r3, features = B.v3.cluster.genes, pt.size = -1, cols = B.r3.palette, 
 ggsave("Bcell/B_r3_cluster_markers_violin.pdf", height = 5, width = 8)
 ```
 
-Save Seurat object
+Save Seurat object and metadata
 ```{r}
 saveRDS(B.r3, "Bcell/Bcell_processed.RDS", compress = FALSE)
+saveRDS(B.r3@meta.data, "Bcell/Bcell_processed_metadata.RDS", compress = FALSE)
 ```

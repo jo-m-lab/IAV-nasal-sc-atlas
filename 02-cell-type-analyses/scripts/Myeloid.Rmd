@@ -280,6 +280,7 @@ ggsave("myeloid/myeloid_r3_cluster_markers_violin.pdf", height = 7, width = 12)
 Save Seurat Object
 ```{r}
 saveRDS(myeloid.r3, "myeloid/myeloid_processed.RDS", compress = FALSE)
+saveRDS(myeloid.r3@meta.data, "myeloid/myeloid_processed_metadata.RDS", compress = FALSE)
 ```
 
 

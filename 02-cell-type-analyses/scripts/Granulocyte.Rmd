@@ -276,6 +276,7 @@ ggsave("granulocyte/granulo_r3_cluster_markers_violin.pdf", height = 4.5, width 
 Save Seurat Object
 ```{r}
 saveRDS(granulo.r3, "granulocyte/granulo_processed.RDS", compress = FALSE)
+saveRDS(granulo.r3@meta.data, "granulocyte/granulo_processed_metadata.RDS", compress = FALSE)
 ```
 
 

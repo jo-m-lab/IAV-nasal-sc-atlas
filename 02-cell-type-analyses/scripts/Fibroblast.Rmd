@@ -275,4 +275,6 @@ ggsave("fibroblast/fibro_r3_cluster_markers_violin.pdf", height = 5, width = 10)
 Save Seurat object
 ```{r}
 saveRDS(fibro.r3, "fibroblast/fibro_processed.RDS", compress = FALSE)
+saveRDS(fibro.r3@meta.data, "fibroblast/fibro_processed_metadata.RDS", compress = FALSE)
 ```
+
