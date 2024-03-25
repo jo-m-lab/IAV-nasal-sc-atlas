@@ -36,7 +36,7 @@ sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
                    "#FFEC64","#F9B903","#F48500","#F24400","#873000")
 names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
                           "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
-                          "Naive_LNG","D14_LNG","D02_LNG","D05_LNG","D08_LNG")
+                          "Naive_LNG","D02_LNG","D02_LNG","D05_LNG","D14_LNG")
 ```
 
 Load in stromal object
