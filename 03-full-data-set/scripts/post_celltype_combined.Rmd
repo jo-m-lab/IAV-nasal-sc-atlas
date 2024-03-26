@@ -14,6 +14,7 @@ main.dir = getwd()
 dir.create(file.path(main.dir,"combined-plots"))
 ```
 
+# Set Up
 packages and functions
 ```{r}
 library(tidyverse)

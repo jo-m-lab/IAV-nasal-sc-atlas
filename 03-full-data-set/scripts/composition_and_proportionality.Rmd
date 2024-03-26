@@ -1,0 +1,357 @@
+---
+title: "composition_and_proportionality"
+author: "SWK"
+date: "2024-03-26"
+output: html_document
+---
+
+Run `post_celltype_combined.Rmd` before starting here
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/03-full-data-set")
+main.dir = getwd()
+dir.create(file.path(main.dir,"composition"))
+```
+
+# Set Up
+packages and functions
+```{r}
+library(tidyverse)
+library(ggbiplot)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(propr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D02_LNG","D05_LNG","D08_LNG","D14_LNG")
+
+cell.type.palette = c("#cb9b92","#c15336","#cdbc52","#546439","#79ce5e","#82c7b7","#8089c0","#8447c0","#4d2f46","#c85191")
+names(cell.type.palette) = c("Neuron","Epithelial","Myeloid","Granulocyte","B Cell","T/NK Cell",
+                             "Endothelial","Fibroblast","Stromal","HSC")
+```
+
+Load in the dataset
+```{r}
+full = readRDS("IAV-nasal-sc-atlas/03-full-data-set/data-out/full_dataset_annotated.RDS")
+```
+
+
+# Compositional analysis by PCA
+## All Regions
+The general idea is to run PCA on a table of scaled cell abundances that are properly corrected for sample dependence (i.e. ratio). 
+Here we will calculate the centered log ratio (CLR; see https://www.frontiersin.org/articles/10.3389/fmicb.2017.02224/full).
+We split cells into clusters for downstream analyses
+
+First, we need a table of cells to calculate ratios. 
+We choose to exclude any cells without identity (automatically done in the `CalcFreqByHashFromMD` function.
+The median cell number across samples is ~3000, so we choose to scale the frequencies by that amount to get abundance values (CP3k).
+```{r}
+full.freq.table = CalcFreqByHashFromMD(metadata = full@meta.data, 
+                     col = cluster.names,
+                     which.x.axis = timepoint)
+full.freq.table$CP3k = full.freq.table$freq*3e3
+full.freq.table$timepoint = factor(full.freq.table$timepoint, levels = c("Naive","D02","D05","D08","D14"))
+```
+
+Create the cell count matrices (127 annotated clusters, 45 assignments) and an associated metadata table
+```{r}
+counts.mat = matrix(full.freq.table$n, byrow = FALSE, nrow = 127, 
+                   dimnames = list(levels(full.freq.table$cluster.names), levels(full.freq.table$assignment)))
+CP3k.mat = matrix(full.freq.table$CP3k, byrow = FALSE, nrow = 127, 
+                   dimnames = list(levels(full.freq.table$cluster.names), levels(full.freq.table$assignment)))
+
+# we create a metadata for the matrix, check to make sure the sample ordering matches the column names
+label.metadata = data.frame(row.names = colnames(CP3k.mat),
+                            region = rep(c(rep("OM",5),rep("RM",5),rep("LNG",5)),3),
+                            timepoint = rep(c("D14","D2","D5","D8","Naive"),9),
+                            sample = rep(c("D14_OM","D02_OM","D05_OM","D08_OM","Naive_OM",
+                                           "D14_RM","D02_RM","D05_RM","D08_RM","Naive_RM",
+                                           "D14_LNG","D02_LNG","D05_LNG","D08_LNG","Naive_LNG"),3))
+```
+
+Finally, we can run the CLR transformation and then run PCA
+```{r}
+CLR.CP3k = t(compositions::clr(t(CP3k.mat+1))) # note, we have to transpose as this clr function transforms row-wise
+sample.pca.CLR.CP3k = prcomp(t(CLR.CP3k), center = TRUE, scale = TRUE)
+```
+
+Plot the PCA results annotating for region and sample
+```{r}
+require(ggbiplot)
+ggbiplot(sample.pca.CLR.CP3k, var.axes = FALSE, groups = label.metadata$region) # region
+ggbiplot(sample.pca.CLR.CP3k, var.axes = FALSE, groups = label.metadata$sample, choices = 1:2) + 
+  scale_color_manual(values = sample.palette) + guides(col = "none") + theme(aspect.ratio=1)
+ggsave("composition/full_comp_PCA.pdf", height = 4.5, width = 4.5)
+```
+
+What are the relative contributions of each cluster to the PCs? (i.e., PC loadings)
+```{r}
+CLR.CP3k.loadings = as.data.frame(sample.pca.CLR.CP3k$rotation)
+CLR.CP3k.loadings$cluster = rownames(CLR.CP3k.loadings)
+P1 = ggplot(as.data.frame(CLR.CP3k.loadings), aes(y=PC1, x=reorder(cluster, PC1))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+P2 = ggplot(as.data.frame(CLR.CP3k.loadings), aes(y=PC2, x=reorder(cluster, PC2))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+
+plot_grid(P1, P2, nrow = 2)
+ggsave("composition/full_comp_PC1-2_loadings.pdf", height = 8, width = 5)
+```
+
+Save the composition components in case we want to come back to them later without loading in the whole Seurat Object
+```{r}
+saveRDS(full.freq.table, file = "data-out/full_dataset_freq_table.RDS")
+saveRDS(CP3k.mat, file = "data-out/full_dataset_CP3k_mat.RDS")
+saveRDS(label.metadata, file = "data-out/full_dataset_comp_metadata.RDS")
+```
+
+
+## RM Only
+Subset to just the RM samples and remove any clusters not present in this region
+```{r}
+CP3k.mat.RM = CP3k.mat[,label.metadata$region == "RM"]
+CP3k.mat.RM = CP3k.mat.RM[rowSums(CP3k.mat.RM) > 0,]
+CLR.CP3k.mat.RM = t(compositions::clr(t(CP3k.mat.RM+1)))
+label.metadata.RM = label.metadata[label.metadata$region == "RM",]
+```
+
+Run the PCA and plot the results
+```{r}
+sample.pca.CLR.CP3k.RM = prcomp(t(CLR.CP3k.mat.RM), center = TRUE, scale = TRUE)
+ggbiplot(sample.pca.CLR.CP3k.RM, var.axes = FALSE, groups = label.metadata.RM$sample) + 
+  scale_color_manual(values = sample.palette) + theme(aspect.ratio=1) + labs(col = "Sample")
+ggsave("composition/RM_only_PCA.pdf", height = 5, width = 6)
+```
+
+Loadings by PC
+```{r}
+CLR.CP3k.RM.loadings = as.data.frame(sample.pca.CLR.CP3k.RM$rotation)
+CLR.CP3k.RM.loadings$cluster = rownames(CLR.CP3k.RM.loadings)
+P1 = ggplot(as.data.frame(CLR.CP3k.RM.loadings), aes(y=PC1, x=reorder(cluster, PC1))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+P2 = ggplot(as.data.frame(CLR.CP3k.RM.loadings), aes(y=PC2, x=reorder(cluster, PC2))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+
+plot_grid(P1, P2, nrow = 2)
+ggsave("composition/RM_only_PC1-2_loadings.pdf", height = 8, width = 5)
+```
+
+
+## OM Only
+Subset to just the OM samples and remove any clusters not present in this region
+```{r}
+CP3k.mat.OM = CP3k.mat[,label.metadata$region == "OM"]
+CP3k.mat.OM = CP3k.mat.OM[rowSums(CP3k.mat.OM) > 0,]
+CLR.CP3k.mat.OM = t(compositions::clr(t(CP3k.mat.OM+1)))
+label.metadata.OM = label.metadata[label.metadata$region == "OM",]
+```
+
+PCA and plot results
+```{r}
+sample.pca.CLR.CP3k.OM = prcomp(t(CLR.CP3k.mat.OM), center = TRUE, scale = TRUE)
+ggbiplot(sample.pca.CLR.CP3k.OM, var.axes = FALSE, groups = label.metadata.OM$sample) + 
+  scale_color_manual(values = sample.palette) + theme(aspect.ratio=1) + labs(col = "Sample")
+ggsave("composition/OM_only_PCA.pdf", height = 5, width = 6)
+```
+
+Loadings by PC
+```{r}
+CLR.CP3k.OM.loadings = as.data.frame(sample.pca.CLR.CP3k.OM$rotation)
+CLR.CP3k.OM.loadings$cluster = rownames(CLR.CP3k.OM.loadings)
+P1 = ggplot(as.data.frame(CLR.CP3k.OM.loadings), aes(y=PC1, x=reorder(cluster, PC1))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+P2 = ggplot(as.data.frame(CLR.CP3k.OM.loadings), aes(y=PC2, x=reorder(cluster, PC2))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+
+plot_grid(P1, P2, nrow = 2)
+ggsave("composition/OM_only_PC1-2_loadings.pdf", height = 8, width = 5)
+```
+
+
+## Subsetted to just LNG
+Subset to just the LNG samples and remove any clusters not present in this region
+```{r}
+CP3k.mat.LNG = CP3k.mat[,label.metadata$region == "LNG"]
+CP3k.mat.LNG = CP3k.mat.LNG[rowSums(CP3k.mat.LNG) > 0,]
+CLR.CP3k.mat.LNG = t(compositions::clr(t(CP3k.mat.LNG+1)))
+label.metadata.LNG = label.metadata[label.metadata$region == "LNG",]
+```
+
+PCA and plot results
+```{r}
+sample.pca.CLR.CP3k.LNG = prcomp(t(CLR.CP3k.mat.LNG), center = TRUE, scale = TRUE)
+ggbiplot(sample.pca.CLR.CP3k.LNG, var.axes = FALSE, groups = label.metadata.LNG$sample) + 
+  scale_color_manual(values = sample.palette) + theme(aspect.ratio=1) + labs(col = "Sample")
+ggsave("composition/LNG_only_PCA.pdf", height = 5, width = 6)
+```
+
+Loadings by PC
+```{r}
+CLR.CP3k.LNG.loadings = as.data.frame(sample.pca.CLR.CP3k.LNG$rotation)
+CLR.CP3k.LNG.loadings$cluster = rownames(CLR.CP3k.LNG.loadings)
+P1 = ggplot(as.data.frame(CLR.CP3k.LNG.loadings), aes(y=PC1, x=reorder(cluster, PC1))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+P2 = ggplot(as.data.frame(CLR.CP3k.LNG.loadings), aes(y=PC2, x=reorder(cluster, PC2))) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+
+plot_grid(P1, P2, nrow = 2)
+ggsave("composition/LNG_only_PC1-2_loadings.pdf", height = 8, width = 5)
+```
+
+
+# Proportionality Analysis (RM)
+See doi:10.1038/s41598-017-16520-0 for an explanation of the `propr` package. 
+For proprtionality analysis we need samples as rows, so we transpose the matrices.
+Note, propr functions calculate the clr transformation for us, so we need to provide the abundance (CP3k) matrix
+```{r}
+CP3k.mat.t.RM = t(CP3k.mat.RM)
+```
+
+Run proportionality with a few different metrics and report results. We choose our significance threshold to be FDR < 0.05
+Note, we didn't include the `phs` results in the manuscript as they matched the `rho` results
+```{r}
+## rho
+RM.rho = propr(CP3k.mat.t.RM, metric = "rho", ivar = "clr", p = 1000)
+RM.rho = updateCutoffs(RM.rho, cutoff = seq(.65,.95,.01))
+
+#look at results from updateCutoffs to see rho statistic FDR relationship
+RM.rho@fdr #rho cutoff >0.75 has fdr < 0.05
+RM.rho.fdr05 = RM.rho[">", .74]
+
+# ## phis
+# RM.phs = propr(CP3k.mat.t.RM, metric = "phs", ivar = "clr", p = 1000)
+# RM.phs = updateCutoffs(RM.phs, cutoff = seq(.05,.35,.01))
+# 
+# #look at results from updateCutoffs to see phs statistic FDR relationship
+# RM.phs@fdr #rho cutoff <0.15 has fdr < 0.05
+# RM.phs.fdr05 = RM.phs["<", .15]
+
+## correlation (pearson)
+RM.cor = propr(CP3k.mat.t.RM, metric = "cor", ivar = "clr", p = 1000)
+RM.cor = updateCutoffs(RM.cor, cutoff = seq(.65,.95,.01))
+
+#look at results from updateCutoffs to see cor statistic FDR relationship
+RM.cor@fdr #pearson cutoff>0.71 has fdr < 0.05
+RM.cor.fdr05 = RM.cor[">", .71]
+```
+
+Get the pairs of clusters that are significantly proportional/correlated
+```{r}
+RM.rho.pairs = arrayInd(RM.rho.fdr05@pairs, .dim = dim(RM.rho@matrix))
+RM.rho.pairs.df = data.frame(clust1 = rownames(RM.rho@matrix)[RM.rho.pairs[,1]],
+                             clust2 = colnames(RM.rho@matrix)[RM.rho.pairs[,2]],
+                             rho = RM.rho@matrix[RM.rho.fdr05@pairs])
+
+# RM.phs.pairs = arrayInd(RM.phs.fdr05@pairs, .dim = dim(RM.phs@matrix))
+# RM.phs.pairs.df = data.frame(clust1 = rownames(RM.phs@matrix)[RM.phs.pairs[,1]],
+#                              clust2 = colnames(RM.phs@matrix)[RM.phs.pairs[,2]],
+#                              phs = RM.phs@matrix[RM.phs.fdr05@pairs])
+
+RM.cor.pairs = arrayInd(RM.cor.fdr05@pairs, .dim = dim(RM.cor@matrix))
+RM.cor.pairs.df = data.frame(clust1 = rownames(RM.cor@matrix)[RM.cor.pairs[,1]],
+                             clust2 = colnames(RM.cor@matrix)[RM.cor.pairs[,2]],
+                             cor = RM.cor@matrix[RM.cor.fdr05@pairs])
+```
+
+Plot cutoffs from the permutation tests
+```{r}
+rho.cutoff = ggplot(RM.rho@results, aes(x = propr)) + geom_histogram(col = "black", fill = "gray90", binwidth = 0.1) + 
+  geom_vline(xintercept = 0.74, col = "darkred", linetype = "dashed", size = 1) +
+  labs(x = expression(paste("Proportionality, ", rho)), y = "Count") + 
+  annotate("text", x = -0.7, y = 900, label = expression(atop("FDR < 0.05", paste(rho, " > 0.74, n = 101"))), size = 5)
+
+# phs.cutoff = ggplot(RM.phs@results, aes(x = propr)) + geom_histogram(col = "black", fill = "gray90", bins = 50) + xlim(-0.5,7.5) + 
+# geom_vline(xintercept = 0.15, col = "darkred", linetype = "dashed", size = 1) + labs(x = expression(paste("Proportionality, ",phi, ""["s"])), y = "Count") + 
+# annotate("text", x = 5, y = 850, label = expression(atop("FDR < 0.05", paste(phi,""["s"],"< 0.15, n = 102"))), size = 5)
+
+cor.cutoff = ggplot(RM.cor@results, aes(x = propr)) + geom_histogram(col = "black", fill = "gray90", binwidth = 0.1) + 
+  geom_vline(xintercept = 0.71, col = "darkred", linetype = "dashed", size = 1) +
+  labs(x = expression(paste("Proportionality, Pearson correlation")), y = "Count") + 
+  annotate("text", x = -0.69, y = 700, label = expression(atop("FDR < 0.05", paste("R", ""^2," > 0.71, n = 254"))), size = 5)
+
+plot_grid(rho.cutoff, phs.cutoff, cor.cutoff, nrow = 1)
+ggsave("composition/proportion_cutoff_hists_RM.pdf", height = 5, width = 12)
+```
+
+Overlaps between rho and cor to understand what is missed by correlation
+```{r}
+#sort the matrices based on metric
+RM.rho.pairs.df = RM.rho.pairs.df[order(RM.rho.pairs.df$rho, decreasing = TRUE),]
+#RM.phs.pairs.df = RM.phs.pairs.df[order(RM.phs.pairs.df$phs, decreasing = FALSE),]
+RM.cor.pairs.df = RM.cor.pairs.df[order(RM.cor.pairs.df$cor, decreasing = TRUE),]
+
+#add a column to combine cluster names in pair
+RM.rho.pairs.df$pair = paste(RM.rho.pairs.df$clust1, RM.rho.pairs.df$clust2, sep = "__")
+#RM.phs.pairs.df$pair = paste(RM.phs.pairs.df$clust1, RM.phs.pairs.df$clust2, sep = "__")
+RM.cor.pairs.df$pair = paste(RM.cor.pairs.df$clust1, RM.cor.pairs.df$clust2, sep = "__")
+
+#intersection
+#length(intersect(RM.rho.pairs.df$pair, RM.phs.pairs.df$pair))
+length(intersect(RM.rho.pairs.df$pair, RM.cor.pairs.df$pair))
+#length(intersect(RM.phs.pairs.df$pair, RM.cor.pairs.df$pair))
+
+#rank comparison (using rho as the baseline)
+RM.pairs.rank = data.frame(pair = RM.rho.pairs.df$pair,
+                           rho.index = match(RM.rho.pairs.df$pair, RM.rho.pairs.df$pair),
+#                           phs.index = match(RM.rho.pairs.df$pair, RM.phs.pairs.df$pair),
+                           cor.index = match(RM.rho.pairs.df$pair, RM.cor.pairs.df$pair))
+```
+
+Write out the rho and cor matrices for plotting
+```{r}
+write.table(RM.rho@matrix, file = "composition/RM_rho_similarity_mat_CP3k.txt", sep = "\t", quote = FALSE, col.names = NA)
+#write.table(RM.phs@matrix, file = "composition/RM_phs_similarity_mat_CP3k.txt", sep = "\t", quote = FALSE, col.names = NA)
+write.table(RM.cor@matrix, file = "composition/RM_cor_similarity_mat_CP3k.txt", sep = "\t", quote = FALSE, col.names = NA)
+```
+
+Write out the significant pairs into an excel sheet
+```{r}
+RM.sig.prop.dfs = list(RM.rho.pairs.df, RM.cor.pairs.df)
+names(RM.sig.prop.dfs) = c("rho","cor")
+write.xlsx(RM.sig.prop.dfs, file = "RM_significant_proportional_pairs.xlsx", rowNames = FALSE)
+```
+
+* The heatmap in Figure 6A was generated in morpheus (https://software.broadinstitute.org/morpheus/) *
+* The network in Figure 6B and Supplementary Figure 6B was generated using Cytoscape from the RM_significant_proportional_pairs.xlsx file *
+
+# Abundance Plots
+Here we plot the temporal abundances of select proportional clusters that were displayed in the manuscript
+```{r}
+#IFN-Stim MDMs, Gzmk+ CD8s, Ifng+ CD4s
+PlotTemportalAbundance(abundances = RM.freq.table, clusters = c("IFN-Stim MDM", "Gzmk+ CD8 T", "Ifng+Cd200+ CD4 T"), 
+                       group.palette = c("red3", "royalblue4", "gold4"), span = 0.7)
+ggsave("composition/IFN-Stim_MDM_and_Gzmk_CD8s_and_Ifng_CD4s_abundance.pdf", height = 3.5, width = 5.75)
+
+#Krt13+Ila+ Epi, Cd103 T, and CD4 T
+PlotTemportalAbundance(abundances = RM.freq.table, clusters = c("Krt13+Il1a+ Epi", "Cd103+ CD8 T", "CD4 T"), 
+                       group.palette = c("red3", "royalblue4", "gold4"), span = 0.7)
+ggsave("composition/Krt13_Epi_and_Trm_and_CD4_abundance.pdf", height = 3.5, width = 5)
+
+#Gp2+Lyz2+ Gob/Sec, Cd103+ DC, Dusp2+Icam1+ Mature Neu
+PlotTemportalAbundance(abundances = RM.freq.table, clusters = c("Gp2+Lyz2+ Gob/Sec", "Cd103+ DC", "Dusp2+Icam1+ Mature Neu"), 
+                       group.palette = c("red3", "royalblue4", "gold4"), span = 0.7)
+ggsave("composition/Gp2GobSec_and_Cd103DC_and_Dusp2Neut_abundance.pdf", height = 3.5, width = 6)
+```
+
