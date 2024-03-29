@@ -1,0 +1,178 @@
+---
+title: "create_sobj"
+author: "SWK"
+date: "02/07/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/01-post-cellbender/")
+main.dir = getwd()
+dir.create(file.path(main.dir,"output"))
+```
+
+```{r}
+library(tidyverse)
+library(Seurat)
+library(cowplot)
+library(future)
+theme_set(theme_cowplot())
+#plan("multicore", workers = 60)
+#options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+```
+
+# Importing Data
+## Cellbender h5 files
+Read in each cellbender filtered matrix and fix names
+```{r}
+#list all of the files so we can read them in recursively
+h5.cellbender.files = list.files("inputs/cb", pattern = "h5", full.names = TRUE)
+
+#name order of the files
+sample.names = c("D14_OM","D14_RM","D14_LNG","D02_OM","D02_RM","D02_LNG","D05_OM","D05_RM","D05_LNG",
+                 "D08_OM","D08_RM","D08_LNG","Naive_OM","Naive_RM","Naive_LNG")
+
+#create an empty list to hold the matrices
+cb.mats = list()
+
+#loop through all of the files
+for (i in 1:length(h5.cellbender.files)){
+  cb.mats[[i]] = Read10X_h5(h5.cellbender.files[i])
+}
+
+#remove "-1" from all of the column names and order, and add sample name on the top
+for (i in 1:length(cb.mats)){
+  colnames(cb.mats[[i]]) = sapply(strsplit(colnames(cb.mats[[i]]), split = "-"), "[[", 1)
+  colnames(cb.mats[[i]]) = paste(sample.names[i], colnames(cb.mats[[i]]), sep=".")
+  cb.mats[[i]] = cb.mats[[i]][,order(colnames(cb.mats[[i]]))]
+}
+```
+
+What are the cell numbers in each?
+```{r}
+sapply(cb.mats, function(x) dim(x)[2])
+```
+
+
+# Prefiltering
+## Merge Matrices and create Seurat Object
+Merge matrices
+```{r}
+mat.big = cbind(cb.mats[[1]], cb.mats[[2]])
+cb.mats = cb.mats[3:15]
+times = length(cb.mats)-1
+
+for(i in 1:times){
+  mat.big = cbind(mat.big, cb.mats[[1]])
+  cb.mats = cb.mats[-1]
+}
+
+mat.big = cbind(mat.big, cb.mats[[1]])
+rm(cb.mats)
+```
+
+Create a big seurat object
+```{r}
+cb = CreateSeuratObject(counts = mat.big, names.field = 1, names.delim = "\\.", min.cells = 0, min.features = 0)
+cb
+rm(mat.big)
+table(cb$orig.ident)
+```
+
+
+## Add in HTO data
+The calls and hash counts were pulled from the cumulus demux pipeline and are provided in the git repo
+```{r}
+load("data/EM_demux_primary.RData")
+```
+
+Trim demux down to bcs in mat.big and add in empty rows for missing cells
+```{r}
+#rename
+for(i in 1:length(demux.calls)){
+  row.names(demux.calls[[i]]) = paste(sample.names[i], row.names(demux.calls[[i]]), sep = ".")
+  row.names(demux.counts[[i]]) = paste(sample.names[i], row.names(demux.counts[[i]]), sep = ".")
+}
+
+#keep only bcs present in the seurat object
+for(i in 1:length(demux.calls)){
+  demux.calls[[i]] = demux.calls[[i]][which(rownames(demux.calls[[i]]) %in% colnames(cb)),]
+  demux.counts[[i]] = as.data.frame(demux.counts[[i]][which(rownames(demux.counts[[i]]) %in% colnames(cb)),])
+  demux.counts[[i]]$cell.name = row.names(demux.counts[[i]])
+}
+
+#some clean up
+demux.calls.trim = do.call(rbind, demux.calls)
+demux.counts.trim = demux.counts %>% reduce(full_join, by = "cell.name")
+row.names(demux.counts.trim) = demux.counts.trim$cell.name
+demux.counts.trim = demux.counts.trim[,-4]
+demux.counts.trim[is.na(demux.counts.trim)] = 0
+
+#additional rows for missing cells in demux counts
+missing.cells = colnames(cb)[which(! colnames(cb) %in% rownames(demux.counts.trim))]
+missing.cells.counts = as.data.frame(matrix(data = 0, nrow = length(missing.cells), ncol = ncol(demux.counts.trim)))
+rownames(missing.cells.counts) = missing.cells; colnames(missing.cells.counts) = colnames(demux.counts.trim)
+demux.counts.trim = rbind(demux.counts.trim, missing.cells.counts)
+
+#order everything
+demux.counts.trim = demux.counts.trim[order(rownames(demux.counts.trim)),]
+demux.calls.trim = demux.calls.trim[order(rownames(demux.calls.trim)),]
+```
+
+Add in the HTOs and calls to cb
+```{r}
+cb = AddMetaData(cb, metadata = demux.calls.trim[,c("demux_type","assignment")])
+cb[["HTO"]] = CreateAssayObject(counts = t(demux.counts.trim))
+```
+
+remove unneccesary demux stuff now
+```{r}
+rm(demux.calls, demux.calls.trim, demux.counts, demux.counts.trim, missing.cells.counts)
+gc()
+```
+
+
+## QC Filtering
+MT read percentage
+```{r}
+cb <- PercentageFeatureSet(cb, pattern = "^mt-", col.name = "percent.mt")
+```
+
+VlnPlots of QC metrics
+```{r}
+VlnPlot(cb, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), pt.size = 0, ncol = 1, group.by = "orig.ident")
+ggsave("output/QC Violins.pdf", height = 10, width = 7)
+```
+
+Remove bad cells
+Here we remove any cells with fewer than 500 genes, fewer than 750 or more than 100000 UMIs, and more than 15% mitochondrial reads
+```{r}
+cb = subset(cb, subset = nFeature_RNA > 500 & percent.mt < 15 & 
+              nCount_RNA > 750 & nCount_RNA < 100000)
+```
+
+QC Metric plots after filtering
+```{r}
+VlnPlot(cb, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), pt.size = 0, ncol = 1, group.by = "orig.ident")
+ggsave("output/QC Violins Trimmed.pdf", height = 10, width = 7.5)
+```
+
+Remove any cells with more than 10000 hashes and any genes not expressed in at least 10 cells
+```{r}
+cb = subset(cb, subset = nCount_HTO <= 1e4)
+cb = subset(cb, features = c(rownames(cb)[which(rowSums(cb@assays$RNA@counts > 0) >= 10)], rownames(cb[["HTO"]])))
+```
+
+Plot the Cell Counts per sample
+```{r}
+cell.counts.trimmed = data.frame(table(cb$orig.ident))
+ggplot(cell.counts.trimmed, aes(x=Var1, y=Freq)) + geom_bar(aes(fill = sample.names), stat = "identity") + labs(x = "", y = "cb Cell Count") + guides(fill = 'none') + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("output/Cell Counts Trimmed v3.pdf", height = 5, width = 7)
+```
+
+Output combined data
+```{r}
+saveRDS(cb, file = "output/cellbender_trimmed_sobj.RDS", compress = FALSE)
+```
+

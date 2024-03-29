@@ -1,0 +1,325 @@
+---
+title: "clustering_and_filtering"
+author: "SWK"
+date: "02/10/2024"
+output: html_document
+---
+
+# Set Up
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/01-post-cellbender")
+```
+
+Note, this analysis was done using Seurat v4.2.0
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+#plan("multicore", workers = 60)
+#options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+
+sample.names = c("D14_OM","D14_RM","D14_LNG","D02_OM","D02_RM","D02_LNG","D05_OM","D05_RM","D05_LNG",
+                 "D08_OM","D08_RM","D08_LNG","Naive_OM","Naive_RM","Naive_LNG")
+
+main.dir = getwd()
+```
+
+## Bring in data
+Load in Seurat Object
+```{r}
+cb = readRDS(file = "output/cellbender_trimmed_sobj.RDS")
+```
+
+# Top Level Clustering and Exploration, doublets removed
+Create folder for outputs
+```{r}
+dir.create(file.path(main.dir,"dedub"))
+```
+
+## remove doublets
+```{r}
+cb.dedub = subset(cb, cells = colnames(cb)[cb$demux_type %in% c("unknown","singlet")])
+cb.dedub
+rm(cb)
+gc()
+```
+
+## processing through clustering
+Run scTransform
+```{r}
+cb.dedub = SCTransform(cb.dedub, verbose = TRUE, method = "glmGamPoi")
+gc()
+```
+
+Run PCA, look at plenty of PCs on the elbow plot since the dataset is quite complex
+```{r}
+cb.dedub = RunPCA(cb.dedub, verbose = TRUE)
+DimPlot(cb.dedub, dims = c(1,2), pt.size = 0.1)
+ElbowPlot(cb.dedub, ndims = 75)
+```
+
+We picked 40 PCs on the Elbow Plot for downstream analysis.
+Generally, we try a few different clustering resolutions to help determine over/underclustering
+```{r}
+cb.dedub = FindNeighbors(cb.dedub, dims = 1:40, k.param = 30)
+cb.dedub = FindClusters(cb.dedub, dims = 1:40, resolution = 0.2)
+cb.dedub = FindClusters(cb.dedub, dims = 1:40, resolution = 0.4)
+cb.dedub = FindClusters(cb.dedub, dims = 1:40, resolution = 0.6)
+cb.dedub = RunUMAP(cb.dedub, dims = 1:40, n.neighbors = 30)
+```
+
+Plot UMAP with various clustering resolutions, sample identity, demultiplex type, and UMI count
+```{r}
+p1 = DimPlot(cb.dedub, dims = 1:2, pt.size = 0.3, group.by = "SCT_snn_res.0.2", raster = TRUE)
+p2 = DimPlot(cb.dedub, dims = 1:2, pt.size = 0.3, group.by = "SCT_snn_res.0.4", raster = TRUE)
+p3 = DimPlot(cb.dedub, dims = 1:2, pt.size = 0.3, group.by = "SCT_snn_res.0.6", raster = TRUE)
+p4 = DimPlot(cb.dedub, dims = 1:2, pt.size = 0.3, group.by = "orig.ident", raster = TRUE)
+p5 = DimPlot(cb.dedub, dims = 1:2, pt.size = 0.3, group.by = "demux_type", raster = TRUE)
+p6 = FeaturePlot(cb.dedub, features = "nCount_SCT", pt.size = 0.3, raster = TRUE)
+
+plot_grid(p1,p2,p3,p4,p5,p6, ncol = 3)
+ggsave("dedub_v1_UMAP.pdf", height = 12, width = 20)
+```
+
+Find cluster marker genes
+We choose res = 0.6 in order to identify clusters of doublets/low quality cells for removal
+```{r}
+#cb.dedub = SetIdent(cb.dedub, value = "SCT_snn_res.0.2")
+#all.markers.res02 = FindAllMarkers(cb.dedub, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE, max.cells.per.ident = 1500, densify = TRUE)
+#cb.dedub = SetIdent(cb.dedub, value = "SCT_snn_res.0.4")
+#all.markers.res04 = FindAllMarkers(cb.dedub, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE, max.cells.per.ident = 1500)
+cb.dedub = SetIdent(cb.dedub, value = "SCT_snn_res.0.6")
+all.markers.res06 = FindAllMarkers(cb.dedub, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE, max.cells.per.ident = 1500)
+```
+
+Write out the marker gene table
+```{r}
+#write.xlsx(all.markers.res02, file = "dedub/scT_dedub_res02_all_markers.xlsx")
+#write.xlsx(all.markers.res04, file = "dedub/scT_dedub_res04_all_markers.xlsx")
+write.xlsx(all.markers.res06, file = "dedub/scT_dedub_res06_all_markers.xlsx")
+```
+
+Plotting for visual inspection purposes
+We look at lineage and spillover genes to help call multiplets/bad clusters
+```{r}
+DimPlot(cb.dedub, dims = 1:2, pt.size = 0.3, group.by = "SCT_snn_res.0.6", 
+        raster = TRUE, label = TRUE, label.size = 4, label.box = TRUE)
+VlnPlot(cb.dedub, c("Omp","Epcam","Obp1a","Obp2a","Ptprc","Sox11","Col1a1","Pdpn","Pecam1"), 
+        pt.size = -1, stack = TRUE, fill.by = "ident", flip = TRUE) + NoLegend()
+```
+
+## Filter out bad clusters
+We are going to remove the following clusters that
+1) express multiple mutually exclusive lineage genes
+2) only express very high levels of OBP genes (likely exogenous RNA overwhelming true cell identity) 
+3) lack any known lineage markers
+
+Thus, we remove clusters: 1, 12, 17, 20, 30, 31, 46
+```{r}
+good.clusters = c(0,2:11,13:16,18,19,21:29,32:45,47,48)
+cb.dedub = SetIdent(cb.dedub, value = "SCT_snn_res.0.6")
+cb.tr1 = subset(cb.dedub, subset = SCT_snn_res.0.6 %in% good.clusters)
+cb.tr1
+gc()
+#rm(cb.dedub) #to save space you can save and/or remove the prior object
+```
+
+We will now repeat the processing pipeline procedure to find finer grained multiplets/bad cells
+
+# Top Level Clustering and Exploration, trim round 1 (tr1)
+## Process through once more
+Make new folder for outputs
+```{r}
+dir.create(file.path(main.dir,"tr1"))
+```
+
+scTransform
+```{r}
+cb.tr1 = SCTransform(cb.tr1, verbose = TRUE, method = "glmGamPoi")
+gc()
+```
+
+PCA and clustering (still using 40 PCs)
+```{r}
+cb.tr1 = RunPCA(cb.tr1, verbose = TRUE)
+DimPlot(cb.tr1, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(cb.tr1, ndims = 50)
+cb.tr1 = FindNeighbors(cb.tr1, dims = 1:40, k.param = 30)
+cb.tr1 = FindClusters(cb.tr1, resolution = 0.6)
+cb.tr1 = RunUMAP(cb.tr1, dims = 1:40, n.neighbors = 30)
+```
+
+Plot UMAPs
+```{r}
+p1 = DimPlot(cb.tr1, dims = 1:2, pt.size = 0.1, group.by = "SCT_snn_res.0.6")
+p3 = DimPlot(cb.tr1, dims = 1:2, pt.size = 0.1, group.by = "orig.ident")
+p4 = DimPlot(cb.tr1, dims = 1:2, pt.size = 0.1, group.by = "demux_type")
+
+plot_grid(p1,p2,p3, ncol = 2)
+ggsave("tr1/tr1_UMAP_res06.pdf", height = 16, width = 16)
+```
+
+Generate marker list and save output
+```{r}
+all.markers.dedub.t1.res06 = FindAllMarkers(cb.tr1, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE, max.cells.per.ident = 1500)
+write.xlsx(all.markers.dedub.t1.res06, "dedub trim1/cbdedubt1_sct_res06_all_markers.xlsx")
+```
+
+Visual inspection like before
+```{r}
+DimPlot(cb.tr1, dims = 1:2, pt.size = 0.3, group.by = "SCT_snn_res.0.6", 
+        raster = TRUE, label = TRUE, label.size = 4, label.box = TRUE)
+VlnPlot(cb.tr1, c("Omp","Epcam","Obp1a","Obp2a","Ptprc","Sox11","Col3a1","Pdpn","Pecam1"), 
+        pt.size = -1, stack = TRUE, fill.by = "ident", flip = TRUE) + NoLegend()
+```
+
+We look at some specific comparison just to understand if these are subsets/states or doublets
+```{r}
+markers.3v31 = FindMarkers(cb.tr1, ident.1 = 3, ident.2 = 31, logfc.threshold = 0.5, min.pct = 0.2)
+markers.34 = FindMarkers(cb.tr1, ident.1 = 34, logfc.threshold = 0.5, min.pct =TRUE, only.pos = TRUE, max.cells.per.ident = 1500)
+markers.16v41 = FindMarkers(cb.tr1, ident.1 = 16, ident.2 = 41, logfc.threshold = 0.5, min.pct = 0.2)
+```
+
+Finally, there are two clusters that seem to have snuck through as doublets
+```{r}
+good.clusters2 = c(0:35,38:43)
+cb.tr2 = subset(cb.tr1, subset = SCT_snn_res.0.6 %in% good.clusters2)
+```
+
+## Assigning Broad Cell Type Classes
+Based on the lineage genes from the violin plot above, as well as proximity on the UMAP, 
+and knowledge of other lineage genes, we assign a cell type identity to each cluster.
+We also add in metadata columns for timepoint and region
+Note: we have a few clusters defined by cell cycle genes (e.g., Mki67). We annotate these and return to them below.
+```{r}
+#cell.type (from DE gene xlsx sheet)
+cell.types = c("Neuron","Myeloid","Neuron","Epithelial","Neuron","T/NK Cell","Myeloid",
+               "B Cell","Endothelial","Neuron","Granulocyte","Neuron","Fibroblast","Myeloid",
+               "Epithelial","Epithelial","Epithelial","Stromal","Fibroblast","Epithelial",
+               "Epithelial","Granulocyte","Epithelial","Granulocyte","B Cell",
+               "Epithelial","Epithelial","Endothelial","Cycling","Stromal","Epithelial",
+               "Neuron","Epithelial","Cycling","Epithelial","Epithelial","Fibroblast",
+               "Neuron","Epithelial","Epithelial","Epithelial","T/NK Cell")
+cb.tr2$cell.type = plyr::mapvalues(cb.tr2$SCT_snn_res.0.6, from = c(0:35,38:43), to = cell.types)
+
+#Time point
+cb.tr2$timepoint = sapply(strsplit(x = as.character(cb.tr2$orig.ident), split = "_"), "[[",1)
+
+#region
+cb.tr2$region = sapply(strsplit(x = as.character(cb.tr2$orig.ident), split = "_"), "[[",2)
+```
+
+create directory for trim round 2
+```{r}
+dir.create(file.path(main.dir,"tr2"))
+```
+
+## Annotating cycling/proliferating cells
+We subset the clusters labeled as "Cycling" by cell.type to assign cell type identities
+```{r}
+cb.tr2 = SetIdent(cb.tr2, value = "cell.type")
+cb.prolif = subset(cb.tr2, idents = "Cycling")
+cb.prolif = subset(cb.prolif, features = c(rownames(cb.prolif)[which(rowSums(cb.prolif@assays$SCT@counts > 0) >= 10)], 
+                               rownames(cb.prolif[["HTO"]])))
+cb.prolif
+```
+
+Reprocess again. Here we choose 10 PCs
+```{r}
+cb.prolif = SCTransform(cb.prolif, verbose = TRUE, method = "glmGamPoi")
+cb.prolif = RunPCA(cb.prolif, verbose = TRUE)
+DimPlot(cb.prolif, dims = c(1,2), pt.size = 0.1, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(cb.prolif, ndims = 50)
+cb.prolif = FindNeighbors(cb.prolif, dims = 1:10, k.param = 30)
+cb.prolif = FindClusters(cb.prolif, resolution = 0.2)
+cb.prolif = RunUMAP(cb.prolif, dims = 1:10, n.neighbors = 30)
+```
+
+Plot UMAP
+```{r}
+DimPlot(cb.prolif, pt.size = 0.1, group.by = "SCT_snn_res.0.2", label = TRUE) + NoLegend()
+DimPlot(cb.prolif, pt.size = 0.1, group.by = "orig.ident") + NoLegend()
+```
+
+Find Markers and write out results
+```{r}
+cb.prolif = SetIdent(cb.prolif, value = "SCT_snn_res.0.2")
+prolif.all.markers = FindAllMarkers(cb.prolif, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE)
+View(prolif.all.markers)
+write.xlsx(prolif.all.markers, "tr2/prolif_res02_all_markers.xlsx")
+```
+
+Visualize markers
+```{r}
+FeaturePlot(cb.prolif, features = c("Omp","Epcam","Ptprc","Col3a1","Cd3g"), order = TRUE) & NoLegend() & NoAxes()
+VlnPlot(cb.prolif, features = c("Omp","Epcam","Ptprc","Col3a1"), pt.size = -1, stack = TRUE)
+```
+
+We quickly annotate:
+0 = low quality cells; 1 = B Cell; 2 = Monocyte; 3 = HSC; 4 = Epithelial; 
+5 = Neuron; 6 = Granulocyte, 7 = B cell; 8 = Mast cell; 9 = B Cell
+
+```{r}
+cb.prolif$cell.type = plyr::mapvalues(cb.prolif$seurat_clusters, from=c(0:9), 
+                            to=c("Multiplet","B Cell", "Myeloid", "HSC", "Epithelial", 
+                                 "Neuron", "Granulocyte", "B Cell", "Granulocyte", "B Cell"))
+```
+
+We then replace the "Cycling" name with the newly identified cell types and remove the multiplets
+```{r}
+cb.tr2$cell.type[cb.tr2$cell.type == "Cycling"] = as.character(cb.prolif$cell.type)
+cb.tr2 = subset(cb.tr2, subset = cell.type %in% c("Neuron","Myeloid","Epithelial","T/NK Cell", "B Cell", 
+                                           "Endothelial", "Granulocyte", "Fibroblast", "Stromal", "HSC"))
+gc()
+```
+
+Save the filtered object for later use
+```{r}
+saveRDS(cb.tr2, file = "tr2/full_dataset_post_filter.RDS", compress = FALSE) #can compress, but takes quite a long time to save
+```
+
+# Split up into cell type objects for downstream annotation
+For annotation of cells with PR8 reads, we quickly add in a column to the metadata that counts the total number of PR8 UMIs per cell
+```{r}
+cb.tr2$PR8.SCT.total = colSums(cb.tr2@assays$SCT@data[grep("PR8", rownames(cb.tr2), value = TRUE),])
+```
+
+Create output directory for cell type objects
+```{r}
+dir.create(file.path(main.dir,"cell_type_objs"))
+```
+
+We simply split our object into one for each cell type (minus the HSCs) and save each one for further processing
+```{r}
+cb.tr2 = SetIdent(cb.tr2, value = "cell.type")
+neuron = subset(cb.tr2, cell.type == "Neuron")
+myeloid = subset(cb.tr2, cell.type == "Myeloid")
+epi = subset(cb.tr2, cell.type == "Epithelial")
+TNK = subset(cb.tr2, cell.type == "T/NK Cell")
+B = subset(cb.tr2, cell.type == "B Cell")
+endo = subset(cb.tr2, cell.type == "Endothelial")
+granulo = subset(cb.tr2, cell.type == "Granulocyte")
+fibro = subset(cb.tr2, cell.type == "Fibroblast")
+stromal = subset(cb.tr2, cell.type == "Stromal")
+```
+
+save the objects
+```{r}
+saveRDS(neuron, file = "cell_type_objs/neuron_raw.RDS", compress = FALSE)
+saveRDS(myeloid, file = "cell_type_objs/myeloid_raw.RDS", compress = FALSE)
+saveRDS(epi, file = "cell_type_objs/epithelial_raw.RDS", compress = FALSE)
+saveRDS(TNK, file = "cell_type_objs/TNK_raw.RDS", compress = FALSE)
+saveRDS(B, file = "cell_type_objs/Bcell_raw.RDS", compress = FALSE)
+saveRDS(endo, file = "cell_type_objs/endothelial_raw.RDS", compress = FALSE)
+saveRDS(granulo, file = "cell_type_objs/granulocyte_raw.RDS", compress = FALSE)
+saveRDS(fibro, file = "cell_type_objs/fibroblast_raw.RDS", compress = FALSE)
+saveRDS(stromal, file = "cell_type_objs/stromal_raw.RDS", compress = FALSE)
+```
+
+Next steps are in "02-cell-type-analyses"
+Full dataset analysis (03-full-data-set) will be performed after each of the cell type analyses are complete!
