@@ -1,0 +1,151 @@
+---
+title: "post_celltype_combined"
+author: "SWK"
+date: "2024-03-25"
+output: html_document
+---
+
+** Start here after completing all of the cell type specific analyses (02-cell-type-analyses) **
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/03-full-data-set")
+main.dir = getwd()
+dir.create(file.path(main.dir,"combined-plots"))
+```
+
+# Set Up
+packages and functions
+```{r}
+library(tidyverse)
+library(Seurat)
+library(openxlsx)
+library(cowplot)
+library(dplyr)
+library(future)
+theme_set(theme_cowplot())
+plan("multicore", workers = 60)
+options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+Region/Timepoint Palette
+```{r}
+sample.palette = c("#97F797","#24EA24","#00B700","#007200","#133501",
+                   "#C39DEA","#A05CF7","#7E2CFF","#5413BA","#2C0072",
+                   "#FFEC64","#F9B903","#F48500","#F24400","#873000")
+names(sample.palette) = c("Naive_RM","D02_RM","D05_RM","D08_RM","D14_RM",
+                          "Naive_OM","D02_OM","D05_OM","D08_OM","D14_OM",
+                          "Naive_LNG","D02_LNG","D05_LNG","D08_LNG","D14_LNG")
+
+cell.type.palette = c("#cb9b92","#c15336","#cdbc52","#546439","#79ce5e","#82c7b7","#8089c0","#8447c0","#4d2f46","#c85191")
+names(cell.type.palette) = c("Neuron","Epithelial","Myeloid","Granulocyte","B Cell","T/NK Cell",
+                             "Endothelial","Fibroblast","Stromal","HSC")
+```
+
+
+# Rejoining the data after cell type analyses
+First we load in the full dataset object
+```{r}
+full.unfiltered = readRDS(file = "IAV-nasal-sc-atlas/01-post-cellbender/tr2/full_dataset_post_filter.RDS")
+```
+
+And then the metadata tables
+```{r}
+metadata.files = list.files("IAV-nasal-sc-atlas/02-cell-type-analyses/cell-types", pattern = "RDS", full.names = TRUE)
+md.tables = lapply(metadata.files, readRDS)
+```
+
+To filter, we simply collect all of the cell names left in the metadata tables, in addition to the HSC cells
+```{r}
+remaining.cells = c(do.call(c, sapply(md.tables.tables, rownames)), colnames(full.unfiltered)[full.unfiltered$cell.type == "HSC"])
+full = subset(full.unfiltered, cells = remaining.cells)
+full
+
+#clean up the old object to free up memory
+rm(full.unfiltered)
+gc()
+```
+
+Finally, create a new metadata column for the subset clustering names
+```{r}
+full$cluster.names = as.character(full$cell.type) #copy the cell type column
+for(i in 1:length(md.tables)){ 
+  full$cluster.names[rownames(md.tables[[i]])] = as.character(md.tables[[i]]$cluster.names) #fill row by with the cluster names
+}
+```
+
+
+# Combined Analysis
+Reset plotting orders
+```{r}
+full$cell.type = factor(as.character(full$cell.type), levels = names(cell.type.palette))
+full$orig.ident = factor(as.character(full$orig.ident), levels = names(sample.palette))
+```
+
+First we recalculate the UMAP since we have lost contaminating cells from each cell type
+```{r}
+full = RunUMAP(full, dims = 1:40, n.neighbors = 30)
+```
+
+Then we can plot the UMAP with various metadata overlaid
+```{r}
+# Cell yype
+DimPlot(full, reduction = "umap", group.by = "cell.type", cols = cell.type.palette, pt.size = 0.5, raster = TRUE, raster.dpi = c(1200,1200))
+ggsave("combined-plots/full_UMAP_by_celltype.pdf", height = 5, width = 6.5)
+
+# Sample
+DimPlot(full, reduction = "umap", group.by = "orig.ident", cols = sample.palette, pt.size = 0.5, raster = TRUE, raster.dpi = c(1200,1200), shuffle = TRUE)
+ggsave("combined-plots/full_UMAP_by_sample.pdf", height = 5, width = 6.5)
+
+# Mouse replicate
+DimPlot(full, reduction = "umap", group.by = "assignment", pt.size = 0.5, raster = TRUE, raster.dpi = c(1200,1200), shuffle = TRUE) & NoLegend()
+ggsave("combined-plots/full_UMAP_by_replicate.pdf", height = 5, width = 5)
+```
+
+Stacked bar plots for cell numbers and relative abundances
+```{r}
+cell.type.by.sample = full@meta.data %>% group_by(cell.type,orig.ident) %>% summarise(count = n()) %>% mutate(freq = count/sum(count))
+cell.type.by.sample$orig.ident = factor(cell.type.by.sample$orig.ident, levels = names(sample.palette))
+
+#cell numbers
+ggplot(cell.type.by.sample, aes(x=cell.type, y=count, fill=cell.type)) + geom_bar(stat="identity") +
+  scale_fill_manual(values = cell.type.palette) + theme(axis.text.x = element_text(angle = 45, hjust=1)) + 
+  scale_y_continuous(breaks=seq(0,50000,10000)) + labs(x="", y="Cell counts") + guides(fill = "none")
+ggsave("combined-plots/stacked_barchart_celltype_counts.pdf", height = 4, width = 5)
+  
+#proportion
+ggplot(cell.type.by.sample, aes(x=cell.type, y=100*freq, fill=orig.ident)) + geom_bar(stat="identity") + 
+  scale_fill_manual(values = sample.palette) + theme(axis.text.x = element_text(angle = 45, hjust=1)) + 
+  labs(x="", y="Proportion of cells (% of cell type)", fill = "Sample") + scale_y_reverse()
+ggsave("combined-plots/stacked_barchart_celltype_by_sample.pdf", height = 6, width = 5.5)
+```
+
+Stacked bar plot for percent of cells successfully called as singlets.
+```{r}
+cell.type.by.call = full@meta.data %>% group_by(cell.type,demux_type) %>% summarise(count = n()) %>% mutate(freq = count/sum(count))
+ggplot(cell.type.by.call, aes(x=cell.type, y=100*freq, fill=demux_type)) + geom_bar(stat="identity") + 
+  theme(axis.text.x = element_text(angle = 45, hjust=1)) + labs(x="", y="Percent of Cells", fill = "Hash Call")
+ggsave("celltype_by_hashcall.pdf", height = 5, width = 4.5)
+```
+
+PR8 Expression by cell type
+```{r}
+VlnPlot(full, features = c("PR8-NP", "PR8-HA", "PR8.SCT.total"), group.by = "cell.type", pt.size = 0.1, raster=TRUE)
+ggsave("combined-plots/PR8_expression_by_celltype.pdf", width = 12, height = 5)
+```
+
+Violin plot with lineage defining genes
+```{r}
+allcells.features = c("Omp","Tubb3","Stoml3","Epcam","Krt5","Aqp3","Ly6g","Camp","Il1b","Lyz2","Cd74","Ly6c2",
+                      "Ighm","Ms4a1","Vpreb3","Cd3e","Trbc2","Ncr1","Flt1","Pecam1","Vwf","Col3a1","Dcn","Pi16",
+                      "Acta2","Tagln","Mgp","Mki67","Cd34","Lmo2")
+VlnPlot(full, features = allcells.features, group.by = "cell.type", cols = cell.type.palette, pt.size = -1, stack = TRUE, fill.by = "ident") & NoLegend()
+ggsave("combined-plots/celltype_features_violin_v2.pdf", height = 4, width = 9)
+```
+
+Finally, save the new full annotated object!
+```{r}
+saveRDS(full, file = "data-out/full_dataset_annotated.RDS", compress = FALSE)
+```
+
