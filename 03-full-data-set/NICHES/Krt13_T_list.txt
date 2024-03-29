@@ -1,0 +1,16 @@
+Alcam—Cd6
+Ccl5—Ccr4
+Cd226—Nectin2
+Cd274—Pdcd1
+Cd40lg—Itgb2
+Cd48—Cd2
+Cd96—Nectin2
+Cxadr—Jaml
+Cxcl16—Cxcr6
+Il16—Cd4
+Il16—Cd9
+Il18—Cd48
+Il18—Il18r1
+Itgav—Thy1
+Ppp2r2b—Tgfbr2
+Tnf—Tnfrsf1b

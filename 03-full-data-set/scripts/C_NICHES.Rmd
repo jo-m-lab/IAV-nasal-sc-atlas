@@ -1,0 +1,168 @@
+---
+title: "composition_and_proportionality"
+author: "EML;SWK"
+date: "2023-05-23"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/03-full-data-set")
+main.dir = getwd()
+dir.create(file.path(main.dir,"NICHES"))
+```
+
+# Set Up
+packages
+```{r}
+library(Seurat)
+library(tidyverse)
+library(NICHES)
+library(dplyr)
+library(SeuratWrappers)
+```
+
+Load in RM object
+```{r}
+RM = readRDS("IAV-nasal-sc-atlas/03-full-data-set/data-out/RM_annotated.RDS")
+```
+
+Subset to groups of interest for NICHES analysis and relevant time point for maximum abundance
+```{r}
+N1_d8 <- subset(RM, subset = cluster.names %in% c("Ifng+Cd200+ CD4 T", "Gzmk+ CD8 T", "IFN-Stim MDM") & timepoint == "D08")
+
+N2_d14 <- subset(RM, subset = cluster.names %in% c("Cd103+ DC", "Dusp2+Icam1+ Mature Neu", "Gp2+Lyz2+ Gob/Sec") & timepoint == "D14")
+
+N3_d14 <- subset(RM, subset = cluster.names %in% c("Krt13+Il1a+ Epi", "Cd103+ CD8 T", "CD4 T") & timepoint == "D14")
+```
+
+# Run NICHES
+## Gzmk+ CD8 T & Ifng+Cd200+ CD4 T & IFN-Stim MDM
+We first run ALRA as suggested by the NICHES vignette to impute values for highly zero inflated data
+```{r}
+DefaultAssay(N1_d8) <- "RNA"
+N1_d8 <- NormalizeData(N1_d8)
+N1_d8 <- SeuratWrappers::RunALRA(N1_d8)
+```
+
+Then we run NICHES to generate a new Seurat object with cell-cell pairs as our new "cells"
+```{r}
+scc_N1_d8 <- RunNICHES(N1_d8,
+                         assay = "alra",
+                         species = "mouse",
+                         LR.database = "omnipath",
+                         cell_types = "cluster.names",
+                         CellToCell = T)
+cc_N1_d8 <- scc_N1_d8$CellToCell
+```
+
+With the new cell-cell pair sobj, we run scale data and then find differentially "expressed" ligand-receptor pairs
+```{r}
+cc_N1_d8 <- ScaleData(cc_N1_d8)
+mark_cc_N1_d8 <- FindAllMarkers(cc_N1_d8,
+                                  min.pct = 0.25,
+                                  only.pos = T,
+                                  test.use = "roc")
+write.csv(mark_cc_N1_d8, file = "NICHES/NICHES_cc_N1_d8.csv")
+```
+
+We picked a set of interactions for which we want to generate a heatmap. We load that in, subset the interaction sobj, and output for display in morpheus.
+```{r}
+T_MDM_goi = scan("NICHES/MDM_Effector_T_list.txt", what = character())
+
+# remove interactions between a cluster and itself
+T_MDM_Vec = unique(cc_N1_d8$VectorType)[-c(1,5,9)]
+cc_N1_d8_sub = subset(cc_N1_d8, subset = VectorType %in% T_MDM_Vec, features = T_MDM_goi)
+
+# create data frame with cluster-cluster interaction as the first row and save
+T_MDM_df = rbind(cc_N1_d8_sub$VectorType, as.matrix(cc_N1_d8_sub@assays$CellToCell@data))
+write.table(T_MDM_df, file = "MDM_Effector_T_interaction_mat.txt", quote = FALSE, col.names = FALSE, sep = "\t")
+```
+
+
+## Cd103+ DC & Dusp2+Icam1+ Mature Neu & Gp2+Lyz2+ Gob/Sec
+We first run ALRA as suggested by the NICHES vignette to impute values for highly zero inflated data
+```{r}
+DefaultAssay(N2_d14) <- "RNA"
+N2_d14 <- NormalizeData(N2_d14)
+N2_d14 <- SeuratWrappers::RunALRA(N2_d14)
+```
+
+Then we run NICHES to generate a new Seurat object with cell-cell pairs as our new "cells"
+```{r}
+scc_N2_d14 <- RunNICHES(N2_d14,
+                         assay = "alra",
+                         species = "mouse",
+                         LR.database = "omnipath",
+                         cell_types = "cluster.names",
+                         CellToCell = T)
+cc_N2_d14 <- scc_N2_d14$CellToCell
+```
+
+With the new cell-cell pair sobj, we run scale data and then find differentially "expressed" ligand-receptor pairs
+```{r}
+cc_N2_d14 <- ScaleData(cc_N2_d14)
+mark_cc_N2_d14 <- FindAllMarkers(cc_N2_d14,
+                                  min.pct = 0.25,
+                                  only.pos = T,
+                                  test.use = "roc")
+write.csv(mark_cc_N2_d14, file = "NICHES/NICHES_cc_N2_d14.csv")
+```
+
+We picked a set of interactions for which we want to generate a heatmap. We load that in, subset the interaction sobj, and output for display in morpheus.
+```{r}
+Gob_Neu_DC_goi = scan("NICHES/Gob_Neu_DC_list.txt", what = character())
+
+# remove interactions between a cluster and itself
+Gob_Neu_DC_Vec = unique(cc_N2_d14$VectorType)[-c(1,5,9)]
+cc_N2_d14_sub = subset(cc_N2_d14, subset = VectorType %in% Gob_Neu_DC_Vec, features = Gob_Neu_DC_goi)
+
+# create data frame with cluster-cluster interaction as the first row and save
+Gob_Neu_DC_df = rbind(cc_N2_d14_sub$VectorType, as.matrix(cc_N2_d14_sub@assays$CellToCell@data))
+write.table(Gob_Neu_DC_df, file = "Gob_Neu_DC_interaction_mat.txt", quote = FALSE, col.names = FALSE, sep = "\t")
+```
+
+
+## Krt13+Il1a+ Epi & Cd103+ CD8 T & CD4 T
+We first run ALRA as suggested by the NICHES vignette to impute values for highly zero inflated data
+```{r}
+DefaultAssay(N3_d14) <- "RNA"
+N3_d14 <- NormalizeData(N3_d14)
+N3_d14 <- SeuratWrappers::RunALRA(N3_d14)
+```
+
+Then we run NICHES to generate a new Seurat object with cell-cell pairs as our new "cells"
+```{r}
+scc_N3_d14 <- RunNICHES(N3_d14,
+                         assay = "alra",
+                         species = "mouse",
+                         LR.database = "omnipath",
+                         cell_types = "cluster.names",
+                         CellToCell = T)
+cc_N3_d14 <- scc_N3_d14$CellToCell
+```
+
+With the new cell-cell pair sobj, we run scale data and then find differentially "expressed" ligand-receptor pairs
+```{r}
+cc_N3_d14 <- ScaleData(cc_N3_d14)
+mark_cc_N3_d14 <- FindAllMarkers(cc_N3_d14,
+                                  min.pct = 0.25,
+                                  only.pos = T,
+                                  test.use = "roc")
+write.csv(mark_cc_N3_d14, file = "NICHES/NICHES_cc_N3_d14.csv")
+```
+
+We picked a set of interactions for which we want to generate a heatmap. We load that in, subset the interaction sobj, and output for display in morpheus.
+```{r}
+Krt13_T_goi = scan("NICHES/Krt13_T_list.txt", what = character())
+
+# remove interactions between a cluster and itself
+Krt13_T_Vec = unique(cc_N3_d14$VectorType)[-c(1,5,9)]
+cc_N3_d14_sub = subset(cc_N3_d14, subset = VectorType %in% Krt13_T_Vec, features = Krt13_T_goi)
+
+# create data frame with cluster-cluster interaction as the first row and save
+Krt13_T_df = rbind(cc_N3_d14_sub$VectorType, as.matrix(cc_N3_d14_sub@assays$CellToCell@data))
+write.table(Krt13_T_df, file = "Krt13_T_interaction_mat.txt", quote = FALSE, col.names = FALSE, sep = "\t")
+```
+
+Heatmaps were plotted using the exported interaction matrices using morpheus: https://software.broadinstitute.org/morpheus/

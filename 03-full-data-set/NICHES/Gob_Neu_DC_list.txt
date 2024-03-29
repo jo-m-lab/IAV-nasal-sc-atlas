@@ -1,0 +1,14 @@
+Ccl2—Ccr1
+Cdh1—Itgae
+Cdh1—Itgb7
+Cirbp—Trem1
+Cxadr—Jaml
+Fgf1—Cd44
+Gsto1—Ryr1
+Il18—Il18rap
+Nectin2—Cd226
+Ptpn6—Egfr
+Sftpd—Sirpa
+Tgfb2—Tgfbr1
+Tgfbr1—Tgfbr2
+Tnfsf13—Tnfrsf13b
