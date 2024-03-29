@@ -152,16 +152,16 @@ cb = subset(cb, subset = nFeature_RNA > 500 & percent.mt < 15 &
               nCount_RNA > 750 & nCount_RNA < 100000)
 ```
 
-QC Metric plots after filtering
-```{r}
-VlnPlot(cb, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), pt.size = 0, ncol = 1, group.by = "orig.ident")
-ggsave("output/QC Violins Trimmed.pdf", height = 10, width = 7.5)
-```
-
 Remove any cells with more than 10000 hashes and any genes not expressed in at least 10 cells
 ```{r}
 cb = subset(cb, subset = nCount_HTO <= 1e4)
 cb = subset(cb, features = c(rownames(cb)[which(rowSums(cb@assays$RNA@counts > 0) >= 10)], rownames(cb[["HTO"]])))
+```
+
+QC Metric plots after filtering
+```{r}
+VlnPlot(cb, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), pt.size = 0, ncol = 1, group.by = "orig.ident")
+ggsave("output/QC Violins Trimmed.pdf", height = 10, width = 7.5)
 ```
 
 Plot the Cell Counts per sample
