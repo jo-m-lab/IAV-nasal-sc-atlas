@@ -149,3 +149,8 @@ Finally, save the new full annotated object!
 saveRDS(full, file = "data-out/full_dataset_annotated.RDS", compress = FALSE)
 ```
 
+We also save an object with just cells from RM to use in annotation analyses (including rechallenge)
+```{r}
+saveRDS(subset(full, region == "RM"), file = "data-out/RM_annotated.RDS", compress = FALSE)
+```
+
