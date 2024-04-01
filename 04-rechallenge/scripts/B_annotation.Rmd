@@ -1,0 +1,237 @@
+---
+title: "rehcallenge_annotation"
+author: "SWK"
+date: '2024-02-12'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/04-rechallenge")
+```
+
+packages
+```{r}
+library(tidyverse)
+library(Seurat)
+library(cowplot)
+library(openxlsx)
+library(future)
+theme_set(theme_cowplot())
+#plan("multicore", workers = 60)
+#options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+```
+
+# Annotating Rechallenge Data
+## Set Up
+Load in RM data from primary infection and the preprocessed rechallenge data
+```{r}
+RM = readRDS(file = "IAV-nasal-sc-atlas/03-full-data-set/data-out/RM_annotated.RDS")
+rechallenge = readRDS(file = "output/rechallenge_combined_clust.RDS")
+```
+
+Relevel timepoint to be in chronological and strain order
+```{r}
+rechallenge$timepoint = factor(rechallenge$timepoint, levels = c("D60_PR8","C2_PR8","C5_PR8","D60_X31","C2_X31","C5_X31"))
+```
+
+To run UMAP projection, we need to recalculate the UMAP using only RM to get the model
+```{r}
+RM = RunUMAP(RM, dims = 1:40, n.neighbors = 30, return.model = TRUE)
+```
+
+Palettes
+```{r}
+cell.type.palette = c("#cb9b92","#c15336","#cdbc52","#546439","#79ce5e","#82c7b7","#8089c0","#8447c0","#4d2f46","#c85191") #note we removed HSCs
+names(cell.type.palette) = levels(RM$cell.type)
+
+RM.palette = c("#97F797","#24EA24","#00B700","#007200","#133501")
+names(RM.palette) = c("Naive","D02","D05","D08","D14")
+
+RM.palette.all = c("#97F797","#24EA24","#00B700","#007200","#133501","#081402","#03befc","#0065b8","#757575","#ff5ef4","#b8339b")
+names(RM.palette.all) = c("Naive","D02","D05","D08","D14","D60_PR8","C2_PR8","C5_PR8","D60_X31","C2_X31","C5_X31")
+```
+
+
+## Cell Type Annotations
+First, we need to annotate cell types on the whole RM level
+It's important that the query object has undergone SCT normalization and PCA (we did this in A_preprocessing.Rmd)
+```{r}
+RM.anchors = RM.anchors = FindTransferAnchors(reference = RM,
+                                 query = rechallenge,
+                                 normalization.method = "SCT",
+                                 reference.assay = "SCT",
+                                 reference.reduction = "pca",
+                                 dims = 1:40)
+```
+
+Generate predictions using `cell.type` as the label level
+```{r}
+predictions <- TransferData(anchorset = RM.anchors, refdata = RM$cell.type, dims = 1:40)
+rechallenge = TransferData(anchorset = RM.anchors, refdata = RM$cell.type, dims = 1:40, query = rechallenge)
+rechallenge = AddMetaData(rechallenge, metadata = predictions)
+```
+
+How did we do on calling predictions from a certainty standpoint?
+```{r}
+# visualize maximum prediction scores
+plot(sort(rechallenge$prediction.score.max), ylab = "Max Prediction Score", ylim = c(0,1))
+
+# how many cells had less than a 0.5 prediction score?
+sum(rechallenge$prediction.score.max < 0.5)
+sum(rechallenge$prediction.score.max < 0.5)/ncol(rechallenge)
+
+# how many cells had less than a 0.8 prediction score?
+sum(rechallenge$prediction.score.max < 0.8)
+sum(rechallenge$prediction.score.max < 0.8)/ncol(rechallenge)
+
+# how does this breakdown look by cell type?
+failed.predictions.md = rechallenge@meta.data[rechallenge$prediction.score.max < 0.5,]
+table(failed.predictions.md$predicted.id)
+
+# create two columns annotating liberal (0.5) and conservative (0.8) unknown confidences
+rechallenge$cell.type.lib = rechallenge$cell.type.cons = rechallenge$predicted.id
+rechallenge$cell.type.lib[rechallenge$prediction.score.max < 0.5] = "unknown"
+rechallenge$cell.type.cons[rechallenge$prediction.score.max < 0.8] = "unknown"
+```
+
+We had 513 cells, or 0.6% of all cells have less than 0.5 max prediction score, so overall our calling capacity was very good.
+Neuron, Myeloid, and Epithelial had the highest numbers of poorly predicted cells.
+Cells with poor cell type predictions could be doublets, so we could also set a more conservative cutoff like 0.8 max prediction score.
+3171 cells, or ~3.9% of cell have less than 0.8 max prediciton score. This is less or on-par with the number of intrasample doublets removed in the acute dataset.
+
+What do these calls look like on the UMAP from the new dataset?
+```{r}
+DimPlot(rechallenge, reduction = "umap", pt.size = 0.1, group.by = "cell.type.lib")
+DimPlot(rechallenge, reduction = "umap", pt.size = 0.1, group.by = "cell.type.cons")
+FeaturePlot(rechallenge, features = "prediction.score.max", pt.size = 0.1, order = TRUE, cols = c("red","gray95"))
+```
+
+Summarize the cell calls by replicate
+```{r}
+#calculate cells per replicate per timepoint
+rechallenge.md = rechallenge@meta.data
+rechallenge.md$assignment = as.character(rechallenge.md$assignment)
+cell.type.by.assignment.cons = rechallenge.md %>% group_by(orig.ident, assignment, cell.type.cons) %>% dplyr::summarise(count = n()) %>% 
+  ungroup() %>% group_by(orig.ident) %>% tidyr::complete(assignment, cell.type.cons, fill = list(count = 0))
+
+#all cell numbers
+cell.numbers = as.data.frame(sort(table(rechallenge.md$cell.type.cons), decreasing = TRUE))
+ggplot(cell.numbers, aes(x=Var1, y=Freq, fill=Var1)) + geom_histogram(stat = "identity") + guides(fill = "none") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + scale_fill_manual(values = cell.type.palette)
+ggsave("output/rechallenge_combined_predicted_celltype_numbers.pdf", height = 4, width = 6)
+```
+
+UMAP Projection 
+```{r}
+rechallenge.projected = IntegrateEmbeddings(anchorset = RM.anchors, reference = RM, query = rechallenge, new.reduction.name = "ref.pca")
+rechallenge.projected = ProjectUMAP(query = rechallenge.projected, query.reduction = "ref.pca", reference = RM, reference.reduction = "pca", reduction.model = "umap")
+```
+
+Plot UMAPs
+```{r}
+p1 = DimPlot(RM, pt.size = 1, group.by = "cell.type", reduction = "umap", cols = cell.type.palette, raster = TRUE, raster.dpi = c(1200,1200)) & NoLegend()
+p2 = DimPlot(rechallenge.projected, pt.size = 1, group.by = "predicted.id", reduction = "ref.umap", cols = cell.type.palette, raster = TRUE, raster.dpi = c(1200,1200))
+
+plot_grid(p1, p2, rel_widths = c(1,1.3))
+ggsave("output/reference_combined_and_projected_UMAPs.pdf", height = 5, width = 11)
+```
+
+
+## Within cell type annotation
+Now that we've annotated the cell type for the rechallenge dataset, we can split up the data into each cell type and run annotation on the cluster level
+First we split up both the primary infection RM dataset and the rechallenge dataset by cell type
+Going forward we will use the cell.type.cons (i.e. max prediction score > 0.8) for labels
+```{r}
+cell.types = c("B Cell", "Endothelial", "Epithelial", "Fibroblast", "Granulocyte", "Myeloid", "Neuron", "Stromal", "T/NK Cell")
+
+RM.ct = list()
+rechallenge.ct = list()
+for(i in 1:length(cell.types)){
+  RM.ct[[i]] = subset(RM, subset = cell.type == cell.types[i])
+  rechallenge.ct[[i]] = subset(rechallenge, subset = cell.type.cons == cell.types[i])
+  rechallenge.ct[[i]]@meta.data = rechallenge.ct[[i]]@meta.data[,-grep("predict", colnames(rechallenge.ct[[i]]@meta.data))] #remove the prediction columns to clean things up
+}
+names(RM.ct) == names(rechallenge.ct) = names(cell.types)
+```
+
+Generate anchors cell-type-by-cell-type
+```{r}
+RM.anchors.ct = list()
+for (i in 1:length(RM.ct)){
+  RM.anchors.ct[[i]] = FindTransferAnchors(reference = RM.ct[[i]],
+                                           query = rechallenge.ct[[i]],
+                                           normalization.method = "SCT",
+                                           reference.assay = "SCT",
+                                           reference.reduction = "pca",
+                                           dims = 1:30,
+                                           k.anchor = 5,
+                                           k.filter = NA,
+                                           max.features = 200,
+                                           approx.pca = FALSE
+                                           )
+}
+```
+
+Calculate predictions
+```{r}
+predictions.ct = list()
+
+for (i in 1:length(RM.anchors.ct)){
+  predictions.ct[[i]] = TransferData(anchorset = RM.anchors.ct[[i]], refdata = RM.ct[[i]]$cluster.names, dims = 1:30, k.weight = 50)
+  rechallenge.ct[[i]] = AddMetaData(rechallenge.ct[[i]], metadata = predictions.ct[[i]])
+}
+```
+
+How are the max prediction scores?
+```{r}
+lapply(rechallenge.ct, function(x){ 
+  plot(sort(x@meta.data$prediction.score.max))
+  sum(x@meta.data$prediction.score.max < 0.4)/ncol(x)
+  })
+
+```
+
+Predictions aren't as strong within cell types. We choose to set a lower threshold for "valid" predictions.
+We note that very similar clusters (e.g. Mature B 1 and Mature B 2) split some cells to have low max prediction scores as they are equally likely to be either.
+
+Here we annotate all cells with max prediction score < 0.4 as unknown, collapse the metadata tables, and add the HSCs back in
+```{r}
+rechallenge.md.by.ct = lapply(rechallenge.ct, function(sobj) {
+  md = sobj@meta.data
+  md$predicted.id[md$prediction.score.max < 0.4] = "unknown"
+  md = md[,-head(grep("prediction", colnames(md)),-1)]
+  return(md)
+})
+
+# collapse all the metadata tables
+names(rechallenge.md.by.ct) = NULL
+rechallenge.md.annot = do.call(rbind, rechallenge.md.by.ct)
+rechallenge.md.annot$predicted.id.score = rechallenge.md.annot$prediction.score.max
+
+# add the HSCs and unknown cells at the cell type level back
+rechallenge.md.HSC = rechallenge.md[rechallenge.md$cell.type.cons == "HSC", head(-grep("prediction", colnames(rechallenge.md)),-1)]
+rechallenge.md.unknown = rechallenge.md[rechallenge.md$cell.type.cons == "unknown", head(-grep("prediction", colnames(rechallenge.md)),-1)]
+rechallenge.md.annot = rbind(rechallenge.md.annot, rechallenge.md.HSC, rechallenge.md.unknown)
+
+#change predicted.id to unknown for those unknown cells we just added back in
+rechallenge.md.annot$predicted.id[rechallenge.md.annot$cell.type.cons == "unknown"] = "unknown"
+```
+
+Add the predictions into the Seurat object
+```{r}
+sum(sort(rownames(rechallenge.md.annot)) == sort(rownames(rechallenge@meta.data)))
+rechallenge.md.annot = rechallenge.md.annot[rownames(rechallenge@meta.data),]
+
+rechallenge@meta.data = rechallenge@meta.data[,-grep("predict", colnames(rechallenge@meta.data))]
+rechallenge@meta.data$predicted.id = rechallenge.md.annot$predicted.id
+rechallenge@meta.data$prediction.score.max = rechallenge.md.annot$prediction.score.max
+```
+
+Save the annotated seurat object
+```{r}
+saveRDS(rechallenge, file = "output/rechallenge_annotated.RDS", compress = FALSE)
+```
+
+Compositional, abundance, and DEG analysis is peformed in C_analysis.Rmd
+
