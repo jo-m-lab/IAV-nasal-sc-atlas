@@ -1,0 +1,277 @@
+---
+title: "rechallenge_preprocessing"
+author: "SWK"
+date: '2024-02-12'
+output: html_document
+---
+
+** Start here for the rechallenge analysis **
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/04-rechallenge")
+main.dir = getwd()
+dir.create(file.path(main.dir,"output"))
+```
+
+packages
+```{r}
+library(tidyverse)
+library(Seurat)
+library(cowplot)
+library(openxlsx)
+library(future)
+theme_set(theme_cowplot())
+#plan("multicore", workers = 60)
+#options(future.globals.maxSize = 2048 * 1024^2) #set options for parallelization
+```
+
+
+# Importing Data
+## Cellbender h5 files
+Read in each cellbender filtered matrix and fix names
+```{r}
+#name order of the files (this file order is necessary due to the demux calling orders)
+sample.names = c("PR8_C2","PR8_C5","PR8_D60","X31_D60","X31_C2","X31_C5")
+
+#create an empty list to hold the matrices
+cb.mats = list()
+cb.mats[1] = Read10X_h5("data/C2-RT_out_filtered.h5")
+cb.mats[2] = Read10X_h5("data/C5-RT_out_filtered.h5")
+cb.mats[3] = Read10X_h5("data/D60-RT_out_filtered.h5")
+cb.mats[4] = Read10X_h5("data/X31/D60_SWK_out_filtered.h5")
+cb.mats[5] = Read10X_h5("data/X31/X31_C2_out_filtered.h5")
+cb.mats[6] = Read10X_h5("X31/X31_C5_out_filtered.h5")
+
+#remove "-1" from all of the column names and order, and add sample name on the top
+for (i in 1:length(cb.mats)){
+  colnames(cb.mats[[i]]) = sapply(strsplit(colnames(cb.mats[[i]]), split = "-"), "[[", 1)
+  colnames(cb.mats[[i]]) = paste(sample.names[i], colnames(cb.mats[[i]]), sep=".")
+  cb.mats[[i]] = cb.mats[[i]][,order(colnames(cb.mats[[i]]))]
+}
+```
+
+What are the cell numbers in each?
+```{r}
+sapply(cb.mats, function(x) dim(x)[2])
+```
+
+# Prefiltering
+## Merge Matrices and create Seurat Object
+Merge matrices
+```{r}
+mat.big = cbind(cb.mats[[1]], cb.mats[[2]])
+cb.mats = cb.mats[3:6]
+times = length(cb.mats)-1
+
+for(i in 1:times){
+  mat.big = cbind(mat.big, cb.mats[[1]])
+  cb.mats = cb.mats[-1]
+}
+
+mat.big = cbind(mat.big, cb.mats[[1]])
+rm(cb.mats)
+```
+
+Create a big seurat object
+```{r}
+cb = CreateSeuratObject(counts = mat.big, names.field = 1, names.delim = "\\.", min.cells = 0, min.features = 0)
+cb
+rm(mat.big)
+table(cb$orig.ident)
+```
+
+
+## Add in HTO data
+The calls and hash counts were pulled from the cumulus demux pipeline and are provided in the git repo
+```{r}
+load("data/EM_demux_rechallenge_PR8.RData")
+demux.calls.PR8 = demux.calls; demux.counts.PR8 = demux.counts
+load("data/EM_demux_rechallenge_X31.RData")
+demux.calls.X31 = demux.calls; demux.counts.X31 = demux.counts
+
+demux.calls = c(demux.calls.PR8, demux.calls.X31); demux.counts = c(demux.counts.PR8, demux.counts.X31)
+```
+
+Trim demux down to bcs in mat.big and add in empty rows for non matching cells
+NOTE: SAMPLE ORDERING FROM THE DEMUX CALLS IS VERY IMPORTANT 
+```{r}
+sample.names = c("PR8_C2","PR8_C5","PR8_D60","X31_D60","X31_C2","X31_C5")
+
+#rename
+for(i in 1:length(demux.calls)){
+  row.names(demux.calls[[i]]) = paste(sample.names[i], row.names(demux.calls[[i]]), sep = ".")
+  row.names(demux.counts[[i]]) = paste(sample.names[i], row.names(demux.counts[[i]]), sep = ".")
+}
+
+demux.calls.cb = demux.calls
+demux.counts.cb = demux.counts
+
+#keep only bcs present in the seurat object
+for(i in 1:length(demux.calls)){
+  demux.calls.cb[[i]] = demux.calls.cb[[i]][which(rownames(demux.calls.cb[[i]]) %in% colnames(cb)),]
+  demux.counts.cb[[i]] = as.data.frame(demux.counts.cb[[i]][which(rownames(demux.counts.cb[[i]]) %in% colnames(cb)),])
+  demux.counts.cb[[i]]$cell.name = row.names(demux.counts.cb[[i]])
+}
+
+#some clean up
+demux.calls.cb.trim = do.call(rbind, demux.calls.cb)
+demux.counts.cb.trim = demux.counts.cb %>% reduce(full_join, by = "cell.name")
+row.names(demux.counts.cb.trim) = demux.counts.cb.trim$cell.name
+demux.counts.cb.trim = demux.counts.cb.trim[,-4]
+demux.counts.cb.trim[is.na(demux.counts.cb.trim)] = 0
+
+#additional rows for missing cells in demux counts
+missing.cells.cb = colnames(cb)[which(! colnames(cb) %in% rownames(demux.counts.cb.trim))]
+missing.cells.cb.counts = as.data.frame(matrix(data = 0, nrow = length(missing.cells.cb), ncol = ncol(demux.counts.cb.trim)))
+rownames(missing.cells.cb.counts) = missing.cells.cb; colnames(missing.cells.cb.counts) = colnames(demux.counts.cb.trim)
+demux.counts.cb.trim = rbind(demux.counts.cb.trim, missing.cells.cb.counts)
+
+#order everything
+demux.counts.cb.trim = demux.counts.cb.trim[order(rownames(cb@meta.data)),]
+demux.calls.cb.trim = demux.calls.cb.trim[order(rownames(cb@meta.data)),]
+```
+
+Add in the HTOs and calls
+```{r}
+cb = AddMetaData(cb, metadata = demux.calls.cb.trim[,c("demux_type","assignment")])
+cb[["HTO"]] = CreateAssayObject(counts = t(demux.counts.cb.trim))
+```
+
+remove unneccesary demux stuff to free up memory
+```{r}
+rm(demux.calls, demux.calls.cb, demux.calls.cb.trim, demux.calls.raw.trim, demux.counts, demux.counts.cb, demux.counts.cb.trim)
+gc()
+```
+
+
+## QC Filtering
+MT read percentage
+```{r}
+cb <- PercentageFeatureSet(cb, pattern = "^mt-", col.name = "percent.mt")
+```
+
+VlnPlots of QC metrics
+```{r}
+VlnPlot(cb, features = c("nCount_RNA", "nFeature_RNA", "percent.mt","PR8-HA"), pt.size = 0, ncol = 4, group.by = "orig.ident") & NoLegend()
+ggsave("output/QC_Plots_unfiltered_combined.pdf", height = 5, width = 8)
+```
+
+Remove bad cells
+Here we remove any cells with fewer than 500 genes, fewer than 750 or more than 100000 UMIs, and more than 15% mitochondrial reads
+```{r}
+cb.trim = subset(cb, subset = nFeature_RNA > 500 & percent.mt < 15 & 
+              nCount_RNA > 750 & nCount_RNA < 100000)
+```
+
+Remove any cells with more than 10000 hashes and any genes not expressed in at least 10 cells
+```{r}
+cb.trim = subset(cb.trim, subset = nCount_HTO <= 1e4)
+cb.trim = subset(cb.trim, features = c(rownames(cb.trim)[which(rowSums(cb.trim@assays$RNA@counts > 0) >= 10)], rownames(cb.trim[["HTO"]])))
+cb.trim
+```
+
+QC Plots after filtering
+```{r}
+VlnPlot(cb.trim, features = c("nCount_RNA", "nFeature_RNA", "percent.mt"), pt.size = 0, ncol = 4, group.by = "orig.ident")
+ggsave("output/QC_Plots_filtered_combined.pdf", height = 5, width = 6)
+```
+
+
+
+# Top Level Clustering and Exploration
+## Remove doublets
+```{r}
+cb.dedub = subset(cb.trim, cells = colnames(cb.trim)[cb.trim$demux_type %in% c("unknown","singlet")])
+cb.dedub
+rm(cb, cb.trim)
+gc()
+```
+
+## Process through clustering
+Run scTransform
+```{r}
+cb.dedub = SCTransform(cb.dedub, verbose = TRUE, method = "glmGamPoi")
+gc()
+```
+
+PCA
+```{r}
+cb.dedub = RunPCA(cb.dedub, verbose = TRUE)
+DimPlot(cb.dedub, dims = c(1,2), pt.size = 0.1)
+ElbowPlot(cb.dedub, ndims = 50)
+```
+Lets use 40 PCs
+
+```{r}
+cb.dedub = FindNeighbors(cb.dedub, dims = 1:40, k.param = 30)
+cb.dedub = FindClusters(cb.dedub, dims = 1:40, resolution = 0.4)
+cb.dedub = FindClusters(cb.dedub, dims = 1:40, resolution = 0.6)
+cb.dedub = RunUMAP(cb.dedub, dims = 1:40, n.neighbors = 30)
+```
+
+Plot UMAP with various clustering resolutions, sample identity, demultiplex type, and UMI count
+```{r}
+p1 = DimPlot(cb.dedub, dims = 1:2, pt.size = 1, group.by = "SCT_snn_res.0.4", raster = TRUE, label = TRUE) + NoLegend()
+p2 = DimPlot(cb.dedub, dims = 1:2, pt.size = 1, group.by = "SCT_snn_res.0.6", raster = TRUE, label = TRUE) + NoLegend()
+p3 = DimPlot(cb.dedub, dims = 1:2, pt.size = 0.5, group.by = "orig.ident", raster = TRUE, shuffle = TRUE)
+p4 = DimPlot(cb.dedub, dims = 1:2, pt.size = 0.5, group.by = "demux_type", raster = TRUE, shuffle = TRUE)
+p5 = FeaturePlot(cb.dedub, features = "nCount_SCT", pt.size = 1, raster = TRUE)
+
+plot_grid(p1,p2,p3,p4,p5, ncol = 3)
+ggsave("output/rechallenge_combined_r1_UMAP.pdf", height = 12, width = 20)
+```
+
+Find cluster marker genes
+We choose res = 0.6 in order to identify clusters of doublets/low quality cells for removal
+```{r}
+# cb.dedub = SetIdent(cb.dedub, value = "SCT_snn_res.0.4")
+# all.markers.res04 = FindAllMarkers(cb.dedub, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE, max.cells.per.ident = 1500)
+cb.dedub = SetIdent(cb.dedub, value = "SCT_snn_res.0.6")
+all.markers.res06 = FindAllMarkers(cb.dedub, logfc.threshold = 0.5, min.pct = 0.2, only.pos = TRUE, max.cells.per.ident = 1500)
+```
+
+Write out the marker gene table
+```{r}
+#write.xlsx(all.markers.res04, file = "rechallenge_X31_r1_res04_all_markers.xlsx")
+write.xlsx(all.markers.res06, file = "output/rechallenge_combined_r1_res06_all_markers.xlsx")
+```
+
+Plotting for visual inspection purposes
+We look at lineage and spillover genes to help call multiplets/bad clusters
+```{r}
+DimPlot(cb.dedub, dims = 1:2, pt.size = 0.3, group.by = "SCT_snn_res.0.6", raster = TRUE, label = TRUE, label.size = 6, label.box = FALSE)
+VlnPlot(cb.dedub, c("Omp","Epcam","Obp1a","Obp2a","Ptprc","Sox11","Col1a1","Pdpn","Pecam1"), pt.size = -1, stack = TRUE, fill.by = "ident", flip = TRUE) + NoLegend()
+```
+Cluster 17 and 19 are OBP cells
+Cluster 33 is OSN/B Cell doublets
+Cluster 27 is proliferating
+
+## Rerun after filtering out doublet/OBP clusters
+We remove clusters 17, 19, and 33 before moving forward
+```{r}
+cb.dedub.r2 = subset(cb.dedub, SCT_snn_res.0.6 %in% c(0:16,18,19:32,34:37))
+rm(cb.dedub)
+```
+
+And then rerun SCT, PCA, and Clustering/UMAP
+```{r}
+gc()
+cb.dedub.r2 = SCTransform(cb.dedub.r2, verbose = TRUE, method = "glmGamPoi")
+gc()
+
+cb.dedub.r2 = RunPCA(cb.dedub.r2, verbose = TRUE)
+DimPlot(cb.dedub.r2, dims = c(1,2), pt.size = 0.1)
+ElbowPlot(cb.dedub.r2, ndims = 50)
+
+cb.dedub.r2 = FindNeighbors(cb.dedub.r2, dims = 1:40, k.param = 30)
+cb.dedub.r2 = FindClusters(cb.dedub.r2, dims = 1:40, resolution = 0.6)
+cb.dedub.r2 = RunUMAP(cb.dedub.r2, dims = 1:40, n.neighbors = 30)
+```
+
+Finally, save this output
+```{r}
+saveRDS(cb.dedub.r2, file = "output/rechallenge_combined_clust.RDS", compress = FALSE)
+```
+
+** We perform annotation in the next script, B_annotation.Rmd **
