@@ -355,3 +355,20 @@ PlotTemportalAbundance(abundances = RM.freq.table, clusters = c("Gp2+Lyz2+ Gob/S
 ggsave("composition/Gp2GobSec_and_Cd103DC_and_Dusp2Neut_abundance.pdf", height = 3.5, width = 6)
 ```
 
+# Distance calculations (RM)
+What are the distances between time points?
+```{r}
+aitchison = dist(t(CLR.CP3k.mat.RM), method = "euclidean", diag = TRUE, upper = TRUE)
+aitchison.mat = as.matrix(aitchison)
+aitchison.df = rbind(as.character(replicate.md.all$timepoint), as.data.frame(aitchison.mat))
+write.xlsx(aitchison.df, file = "composition/aitchison_distance_mat.xlsx", rowNames=TRUE)
+
+#get all pairwise distances
+replicate.pairs = t(combn(colnames(aitchison.mat),2))
+aitchison.pairs = data.frame(replicate.pairs, dist=aitchison.mat[replicate.pairs])
+aitchison.pairs$pair = paste(sapply(strsplit(aitchison.pairs$X1, split="_"), "[[", 3),
+                             sapply(strsplit(aitchison.pairs$X2, split="_"), "[[", 3),
+                             sep = " - ")
+write.xlsx(aitchison.pairs, file = "composition/aitchison_distance_pairs.xlsx", rowNames = FALSE)
+```
+
