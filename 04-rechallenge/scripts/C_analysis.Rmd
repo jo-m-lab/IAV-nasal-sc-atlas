@@ -1,0 +1,596 @@
+---
+title: "rechallenge_analysis"
+author: "SWK"
+date: '2024-02-28'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "IAV-nasal-sc-atlas/04-rechallenge")
+```
+
+packages
+```{r}
+library(tidyverse)
+library(Seurat)
+library(cowplot)
+library(openxlsx)
+library(future)
+library(propr)
+theme_set(theme_cowplot())
+# plan("multicore", workers = 30)
+# options(future.globals.maxSize = 2000 * 1024^2) #set options for parallelization
+source("IAV-nasal-sc-atlas/shared_scripts/plotting_functions_v3.R")
+```
+
+load in data
+```{r}
+RM = readRDS(file = "IAV-nasal-sc-atlas/03-full-data-set/data-out/RM_annotated.RDS")
+rechallenge = readRDS(file = "output/rechallenge_annotated.RDS")
+```
+
+New palette
+```{r}
+RM.palette.all = c("#97F797","#24EA24","#00B700","#007200","#133501","#081402","#03befc","#0065b8","#757575","#ff5ef4","#b8339b")
+names(RM.palette.all) = c("Naive","D02","D05","D08","D14","D60_PR8","C2_PR8","C5_PR8","D60_X31","C2_X31","C5_X31")
+
+cell.type.palette = c("#cb9b92","#c15336","#cdbc52","#546439","#79ce5e","#82c7b7","#8089c0","#8447c0","#4d2f46","#c85191")
+names(cell.type.palette) = c("Neuron","Epithelial","Myeloid","Granulocyte","B Cell","T/NK Cell","Endothelial","Fibroblast","Stromal","HSC")
+```
+
+# Compositional Analysis
+## Projection into primary infection trajectory
+Bring in the precalculated compositional data
+```{r}
+#full.freq.table = readRDS(file = "data-out/full_dataset_freq_table.RDS")
+CP3k.mat = readRDS(file = "data-out/full_dataset_CP3k_mat.RDS")
+label.metadata = readRDS(file = "data-out/full_dataset_comp_metadata.RDS")
+```
+
+Re-calculate the RM compositional space from the primary infection timecourse
+```{r}
+# scale
+CP3k.mat.RM = CP3k.mat[,label.metadata$region == "RM"]
+CP3k.mat.RM = CP3k.mat.RM[rowSums(CP3k.mat.RM) > 0,]
+label.metadata.RM = label.metadata[label.metadata$region == "RM",]
+CLR.CP3k.mat.RM = t(compositions::clr(t(CP3k.mat.RM+1)))
+
+# PCA
+sample.pca.CLR.CP3k.RM = prcomp(t(CLR.CP3k.mat.RM), center = TRUE, scale = TRUE)
+pca.df.plotting = data.frame(sample.pca.CLR.CP3k.RM$x, timepoint = label.metadata.RM$timepoint)
+ggplot(pca.df.plotting, aes(PC1, PC2, col = timepoint)) + geom_point(size = 3) + scale_color_manual(values = RM.palette.all[1:5])
+```
+
+In order to project into the existing PC space, we remove all unknown and unassigned cells and fix some data types in the dataframe
+```{r}
+rechallenge.md.annot = rechallenge@meta.data
+rechallenge.md.annot$assignment = as.character(rechallenge.md.annot$assignment)
+
+rechallenge.md.annot.known = rechallenge.md.annot[rechallenge.md.annot$predicted.id != "unknown",]
+rechallenge.md.annot.known = rechallenge.md.annot[rechallenge.md.annot$assignment != "",]
+```
+
+Next we tabulate counts per cluster per assignment and calculate CP3k
+```{r}
+rechallenge.freq.table = rechallenge.md.annot.known %>% select(orig.ident, assignment, cell.type.cons, predicted.id, timepoint) %>% 
+  group_by(assignment, predicted.id, .drop = FALSE) %>% summarise(n = n()) %>%
+  mutate(CP3k = n/sum(n)*3e3) %>% ungroup() %>% 
+  tidyr::complete(assignment, predicted.id, fill = list(n = 0, CP3k = 0))
+```
+
+create matrix for PCA
+```{r}
+CP3k.rechallenge = matrix(rechallenge.freq.table$CP3k, byrow = FALSE, nrow = length(unique(rechallenge.freq.table$predicted.id)), 
+                             dimnames = list(unique(rechallenge.freq.table$predicted.id), unique(rechallenge.freq.table$assignment)))
+
+#we have to add empty rows for those clusters not assigned
+missed.clusters = rownames(CP3k.mat.RM)[!rownames(CP3k.mat.RM) %in% rownames(CP3k.rechallenge)]
+not.assigned.mat = matrix(0, nrow = length(missed.clusters), ncol = ncol(CP3k.rechallenge), dimnames = list(missed.clusters))
+CP3k.rechallenge = rbind(CP3k.rechallenge, not.assigned.mat)
+CP3k.rechallenge = CP3k.rechallenge[rownames(CP3k.mat.RM),]
+CLR.CP3k.rechallenge = t(compositions::clr(t(CP3k.rechallenge+1)))
+```
+
+project new matrix onto RM PCA
+```{r}
+# perform projection
+predicted.X.pca = scale(t(CLR.CP3k.rechallenge), sample.pca.CP3k.RM$center, sample.pca.CP3k.RM$scale) %*% sample.pca.CP3k.RM$rotation
+predicted.X.pca.df = data.frame(predicted.X.pca, timepoint = rep(c("D60_PR8","C2_PR8","C5_PR8","D60_X31","C2_X31","C5_X31"), times = 3)) #make sure the sample ordering is correct
+
+# collapse the projection results with the original PCA emedding
+pca.df.plotting2 = rbind(pca.df.plotting, predicted.X.pca.df)
+pca.df.plotting2$experiment = c(rep("primary",15),rep("memory",18))
+pca.df.plotting2$timepoint = factor(pca.df.plotting2$timepoint, levels = names(RM.palette.all))
+
+ggplot(pca.df.plotting2, aes(PC1, PC2, col = timepoint, shape = experiment)) + geom_point(size = 3) + scale_color_manual(values = RM.palette.all)
+ggsave("output/rechallenge_projected_PCA_CP3k.pdf", height = 5, width = 6)
+
+ggplot(pca.df.plotting2, aes(PC3, PC4, col = timepoint, shape = experiment)) + geom_point(size = 3) + scale_color_manual(values = RM.palette.all)
+ggsave("output/echallenge_projected_PCA_CP3k_PC3-4.pdf", height = 5, width = 6)
+```
+
+
+## Generate a new PCA using all data
+Combine primary and memory abundance data
+```{r}
+CLR.CP3k.all = cbind(CLR.CP3k.mat.RM, CLR.CP3k.rechallenge) #CLR is done by sample, so we can simply combine the matrices
+
+rechallenge.replicate.md = data.frame(timepoint = rep(c("D60_PR8","C2_PR8","C5_PR8","D60_X31","C2_X31","C5_X31"), times = 3),
+                                      sample = rep(c("D60_PR8","C2_PR8","C5_PR8","D60_X31","C2_X31","C5_X31"), times = 3),
+                                      row.names = colnames(CLR.CP3k.rechallenge))
+
+replicate.md.all = rbind(label.metadata.RM[,-1], rechallenge.replicate.md)
+replicate.md.all$experiment = c(rep("primary",15),rep("memory",18))
+replicate.md.all$timepoint = factor(replicate.md.all$timepoint, levels = names(RM.palette.all))
+```
+
+Calculate and plot PCA
+```{r}
+all.replicates.PCA = prcomp(t(CLR.CP3k.all), center = TRUE, scale = TRUE)
+
+pca.df.plotting.all = data.frame(all.replicates.PCA$x, timepoint = replicate.md.all$timepoint, experiment = replicate.md.all$experiment)
+
+p1 = ggplot(pca.df.plotting.all, aes(PC1, PC2, col = timepoint, shape = experiment)) + geom_point(size = 3) + scale_color_manual(values = RM.palette.all)
+p2 = ggplot(pca.df.plotting.all, aes(PC3, PC4, col = timepoint, shape = experiment)) + geom_point(size = 3) + scale_color_manual(values = RM.palette.all)
+plot_grid(p1, p2, nrow = 1, rel_widths = c(1,1.02))
+ggsave("output/primary_rechallenge_recalculated_PCA_1-4_CP3k.pdf", height = 5, width = 12)
+```
+
+What are the loadings?
+```{r}
+all.replicates.loadings = as.data.frame(all.replicates.PCA$rotation)
+all.replicates.loadings$cluster = rownames(all.replicates.loadings)
+write.xlsx(all.replicates.loadings, file = "output/primary_rechallenge_recalculated_PCA_loadings_CP3k.xlsx", rowNames=TRUE)
+
+ggplot(as.data.frame(all.replicates.loadings), aes(y=PC1, x=reorder(cluster, PC1))) + geom_point(size = 0.5) + geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+ggsave("output/primary_rechallenge_recalculated_PC1_Loadings.pdf", height = 4, width = 6)
+ggplot(as.data.frame(all.replicates.loadings), aes(y=PC4, x=reorder(cluster, PC4))) + geom_point(size = 0.5) + geom_hline(yintercept = 0, linetype = 2, col = "gray40") + 
+  theme(axis.text.x = element_text(angle=45, vjust = 1, hjust = 1, size = 2)) + labs(x = "")
+ggsave("output/primary_rechallenge_recalculated_PC4_Loadings.pdf", height = 4, width = 6)
+```
+
+What are the distances between time points?
+```{r}
+aitchison = dist(t(CLR.CP3k.all), method = "euclidean", diag = TRUE, upper = TRUE)
+aitchison.mat = as.matrix(aitchison)
+aitchison.df = rbind(as.character(replicate.md.all$timepoint), as.data.frame(aitchison.mat))
+write.xlsx(aitchison.df, file = "output/primary_rechallenge_aitchison_distance_mat.xlsx", rowNames=TRUE)
+
+#get all pairwise distances
+replicate.pairs = t(combn(colnames(aitchison.mat),2))
+aitchison.pairs = data.frame(replicate.pairs, dist=aitchison.mat[replicate.pairs])
+aitchison.pairs$pair = paste(sapply(strsplit(aitchison.pairs$X1, split="_"), "[[", 3),
+                             sapply(strsplit(aitchison.pairs$X2, split="_"), "[[", 3),
+                             sep = " - ")
+write.xlsx(aitchison.pairs, file = "output/primary_rechallenge_aitchison_distance_pairs.xlsx", rowNames = FALSE)
+```
+
+** distance plots were generated in Prism **
+
+# Abundance Analysis
+## Split by cell type
+Create joint metadata matrices
+```{r}
+cell.types = c("B Cell", "Endothelial", "Epithelial", "Fibroblast", "Granulocyte", "Myeloid", "Neuron", "Stromal", "T/NK Cell")
+columns.to.keep = c("orig.ident","nCount_RNA","nFeature_RNA","assignment","percent.mt","timepoint","cell.type", "cluster.names")
+
+# Split up the primary infection metadata by cell type
+primary.md = RM@meta.data[,colums.to.keep]
+primary.md$prediction.score.max = NA
+primary.md$experiment = "primary"
+
+primary.md.list = lapply(cell.types, function(x) {
+  subset(RM, cell.type == x)
+  })
+
+# Prepare rechallenge metadata columns to merge appropriately
+memory.md = rechallenge@meta.data[,c("orig.ident","nCount_RNA","nFeature_RNA","assignment","percent.mt","timepoint","cell.type.cons","predicted.id","prediction.score.max")]
+colnames(memory.md) = c("orig.ident","nCount_RNA","nFeature_RNA","assignment","percent.mt","timepoint","cell.type","cluster.names","prediction.score.max")
+memory.md$experiment = "memory"
+memory.md$timepoint = as.character(memory.md$timepoint)
+
+# combine cell type by cell type
+combined.md.list = list()
+for (i in 1:length(primary.md.list)){
+  combined.md.list[[i]] = rbind(primary.md.list[[i]], memory.md[memory.md$cell.type == cell.types[i],])
+  combined.md.list[[i]]$timepoint = factor(combined.md.list[[i]]$timepoint, levels = names(RM.palette.all))
+}
+names(combined.md.list) = names(cell.types)
+```
+
+Calculate the frequencies per cluster within each cell type (not used in the paper)
+Note, I'm not specifying a filename to prevent plotting
+```{r}
+B.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["B"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 12, plot.width = 12, plot.ncol = 4
+                     )
+
+endo.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["endo"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 12, plot.width = 12, plot.ncol = 4
+                     )
+
+epi.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["epi"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 24, plot.width = 12, plot.ncol = 4
+                     )
+
+fibro.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["fibro"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 16, plot.width = 12, plot.ncol = 4
+                     )
+
+gran.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["gran"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 12, plot.width = 12, plot.ncol = 4
+                     )
+
+mye.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["mye"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 20, plot.width = 12, plot.ncol = 4
+                     )
+
+neuron.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["neuron"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 12, plot.width = 12, plot.ncol = 4
+                     )
+
+stroma.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["stroma"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 8, plot.width = 12, plot.ncol = 4
+                     )
+
+TNK.freq = CalcFreqByHashFromMD(metadata = combined.md.list[["TNK"]], 
+                     col = cluster.names,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = NULL,
+                     plot.height = 16, plot.width = 12, plot.ncol = 4
+                     )
+```
+
+## All cells
+### Abundance by cell type per timepoint
+Get the full metadata table
+```{r}
+names(combined.md.list) = NULL
+combined.md.flat = do.call(rbind, combined.md.list)
+```
+
+Stacked bar chart of cell type by timepoint
+```{r}
+cell.type.palette.2 = cell.type.palette[-10] #note we remove HSCs
+
+timepoint.by.cell.type = combined.md.flat %>% group_by(timepoint, cell.type) %>% summarise(count = n()) %>% mutate(freq = count/sum(count))
+timepoint.by.cell.type$cell.type = factor(timepoint.by.cell.type$cell.type, levels = names(cell.type.palette))
+ggplot(timepoint.by.cell.type, aes(x=timepoint, y = freq*100, fill=cell.type)) + geom_bar(stat="identity") + 
+  scale_fill_manual(values = cell.type.palette) + theme(axis.text.x = element_text(angle = 45, hjust=1), axis.title.y=element_text(size = 16)) + 
+  labs(x="", y="% of cells", fill = "Cell Type")
+ggsave("output/timpoint_by_cell_type_barchart.pdf", height = 5, width = 6)
+```
+
+Replicate abundances by timepoint
+```{r}
+timepoint.by.hash = CalcFreqByHashFromMD(metadata = combined.md.flat, 
+                     col = cell.type,
+                     which.x.axis = timepoint,
+                     palette = RM.palette.all,
+                     filename = "output/cell_type_timepoint_by_hash_replicate.pdf",
+                     plot.height = 10,
+                     plot.width = 8,
+                     plot.ncol = 3,
+                     )
+```
+
+Specific plots to overlap the X31 and PR8 data on top of each other in time
+```{r}
+timepoint.by.hash$timepoint.grouped = plyr::mapvalues(timepoint.by.hash$timepoint, 
+                                                      from = c("D60_PR8","C2_PR8","C5_PR8","D60_X31","C2_X31","C5_X31"), 
+                                                      to = rep(c("D60","C2","C5"),2))
+
+p.mye = ggplot(subset(timepoint.by.hash, Cluster.Names == "Myeloid"), aes(x = timepoint.grouped, y = freq*100, col = timepoint)) + 
+  geom_jitter(width = 0.2, height = 0, size = 2.5) + 
+  scale_color_manual(values = RM.palette.all) + labs(x = "", y = "% of RM cells", color = "Sample", title = "Myeloid") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylim(0, 50)
+p.TNK = ggplot(subset(timepoint.by.hash, Cluster.Names == "T/NK Cell"), aes(x = timepoint.grouped, y = freq*100, col = timepoint)) + 
+  geom_jitter(width = 0.2, height = 0, size = 2.5) + 
+  scale_color_manual(values = RM.palette.all) + labs(x = "", y = "% of RM cells", color = "Sample", title = "T/NK Cells") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylim(0,45)
+plot_grid(p.mye, p.TNK, ncol = 2)
+ggsave("output/myeloid_and_TNK_cell.type_freqs_overlaid.pdf", height = 4, width = 9)
+
+p.gran = ggplot(subset(timepoint.by.hash, Cluster.Names == "Granulocyte"), aes(x = timepoint.grouped, y = freq*100, col = timepoint)) + 
+  geom_jitter(width = 0.2, height = 0, size = 2.5) + 
+  scale_color_manual(values = RM.palette.all) + labs(x = "", y = "% of RM cells", color = "Sample", title = "Granulocyte") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylim(0, 15)
+p.B = ggplot(subset(timepoint.by.hash, Cluster.Names == "B Cell"), aes(x = timepoint.grouped, y = freq*100, col = timepoint)) + 
+  geom_jitter(width = 0.2, height = 0, size = 2.5) + 
+  scale_color_manual(values = RM.palette.all) + labs(x = "", y = "% of RM cells", color = "Sample", title = "B Cells") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + ylim(0,35)
+plot_grid(p.gran, p.B, ncol = 2)
+ggsave("output/gran_and_B_cell.type_freqs_overlaid.pdf", height = 4, width = 9)
+```
+
+
+### Abundance by cluster per assignment (replicate)
+Generate the frequency/abundance table and change into matrix
+```{r}
+allcells.freq =  CalcFreqByHashFromMD(metadata = combined.md.flat, 
+                     col = cluster.names,
+                     which.x.axis = timepoint)
+
+allcells.freq = allcells.freq[-which(allcells.freq$Cluster.Names == "unknown"), ]
+
+allcells.freq$CP3k = allcells.freq$freq*3e3
+allcells.freq$log2CP3k = log2(allcells.freq$CP3k + 1) #used for plotting abundances
+
+counts.mat = matrix(allcells.freq$count, byrow = FALSE, nrow = length(unique(allcells.freq$Cluster.Names)), 
+                             dimnames = list(unique(allcells.freq$Cluster.Names), unique(allcells.freq$assignment)))
+CP3k.mat = matrix(allcells.freq$CP3k, byrow = FALSE, nrow = length(unique(allcells.freq$Cluster.Names)), 
+                             dimnames = list(unique(allcells.freq$Cluster.Names), unique(allcells.freq$assignment)))
+CLR.CP3k.mat = t(compositions::clr(t(CP3k.mat+1)))
+
+counts.df = rbind(unlist(lapply(names(RM.palette.all), rep, 3)), as.data.frame(counts.mat))
+CP3k.df = rbind(unlist(lapply(names(RM.palette.all), rep, 3)), as.data.frame(CP3k.mat))
+CLR.CP3k.df = rbind(unlist(lapply(names(RM.palette.all), rep, 3)), as.data.frame(CLR.CP3k.mat))
+rownames(CP3k.df)[1] = rownames(counts.df)[1] = "Time Point"
+```
+
+<!-- write out the abundance matrix -->
+<!-- ```{r} -->
+<!-- write.xlsx(counts.df, file = "output/all_samples_primary_memory_abundance_matrix_counts.xlsx", rowNames = TRUE) -->
+<!-- write.xlsx(CP3k.df, file = "output/all_samples_primary_memory_abundance_matrix_CP3k.xlsx", rowNames = TRUE) -->
+<!-- ``` -->
+
+
+### Comparing trajectories within cluster between primary & memory
+First we need to add the experiment column to the allcells.freq table and add a new time column
+```{r}
+allcells.freq$experiment = plyr::mapvalues(allcells.freq$timepoint, from = names(RM.palette.all), 
+                                           to = c(rep("primary", times = 5), rep("mem_PR8", times = 3), rep("mem_X31", times = 3)))
+allcells.freq$timepoint.comp = plyr::mapvalues(allcells.freq$timepoint, from = names(RM.palette.all), 
+                                               to = c("Baseline","2 dpc","5 dpc","8 dpc","14 dpc","Baseline","2 dpc","5 dpc", "Baseline", "2 dpc", "5 dpc"))
+```
+
+Plot the comparative graphs between Primary, X31, and PR8 rechallenge
+```{r, warning=FALSE, message=FALSE}
+cluster.list = c("IFN-Stim Mature Neu", "MHC-I Hi Mature Neu", "IFN-Stim MDM", "IFN-Stim Mono",
+                 "Gzmk+ CD8 T", "Cd103+ CD8 T",  "Ifng+Cd200+ CD4 T", "CD4 T",
+                 "Mature B 2", "IgG+/IgA+ B", 
+                 "Krt13+Il1a+ Epi", "Meg3+MHC-II+ Epi", "Cycling Basal", "IFN-Stim Epi",
+                 "MHC-II Hi Mac")
+plot.list = list()
+for(i in 1:length(cluster.list)){
+  plot.list[[i]] = PlotTemporalAbundanceComparison(abundances = allcells.freq, cluster = cluster.list[[i]], 
+                                                   group.palette = c("#007200", "#0065b8", "#9b14c4"), time.axis = timepoint.comp, span = 0.7) & NoLegend()
+}
+
+plot_grid(plotlist = plot.list, ncol = 4, byrow = TRUE)
+ggsave("output/primary_vs_memory_abundances.pdf", height = 14.67, width = 10)
+```
+
+
+# Differential Gene Expression Analysis
+## IFN-Stim MDMs
+Subset and correct SCT normalization
+```{r}
+IFN_Stim_MDMs = merge(subset(RM, subset = cluster.names == "IFN-Stim MDM"), subset(rechallenge, subset = predicted.id == "IFN-Stim MDM"))
+IFN_Stim_MDMs = subset(IFN_Stim_MDMs, subset = timepoint %in% c("D08","C2_PR8","C2_X31"))
+IFN_Stim_MDMs$timepoint = factor(IFN_Stim_MDMs$timepoint, levels = c("D08","C2_PR8","C2_X31"))
+IFN_Stim_MDMs = SetIdent(IFN_Stim_MDMs, value = "timepoint")
+IFN_Stim_MDMs = PrepSCTFindMarkers(IFN_Stim_MDMs, assay = "SCT", verbose = TRUE)
+```
+
+Timepoint comparisons
+```{r}
+MDMs.all.markers = FindAllMarkers(IFN_Stim_MDMs, logfc.threshold = 0.5, min.pct = 0.2, only.pos = FALSE, test.use = "bimod")
+write.xlsx(MDMs.all.markers, file = "output/IFN_Stim_MDMs_DEGs_v2.xlsx", rowNames = TRUE)
+```
+
+Plotting
+```{r}
+MDM.plot.markers = c("Lgmn","Cd72","Ccr1","Ms4a7","Rps29","Tnfaip2","Lars2","Parp14")
+DotPlot(IFN_Stim_MDMs, features = MDM.plot.markers, scale = FALSE, dot.scale = 5, cols = c("purple4","gold"),) + coord_flip() + labs(x="", y="") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("output/IFN-Stim_MDMs_DEGs_Dotplot_v2.pdf", height = 4, width = 4)
+```
+
+## CD103+ CD8 T C2
+Subset
+```{r}
+CD103_CD8_T = merge(subset(RM, subset = cluster.names == "Cd103+ CD8 T"), subset(rechallenge, subset = predicted.id == "Cd103+ CD8 T"))
+CD103_CD8_T = subset(CD103_CD8_T, subset = timepoint %in% c("D14","C2_PR8","C2_X31"))
+CD103_CD8_T$timepoint = factor(CD103_CD8_T$timepoint, levels = c("D14","C2_PR8","C2_X31"))
+CD103_CD8_T = SetIdent(CD103_CD8_T, value = "timepoint")
+CD103_CD8_T = PrepSCTFindMarkers(CD103_CD8_T, assay = "SCT", verbose = TRUE)
+```
+
+Timepoint comparisons
+```{r}
+Trm.all.markers = FindAllMarkers(CD103_CD8_T, logfc.threshold = 0.5, min.pct = 0.2, only.pos = FALSE, test.use = "bimod")
+write.xlsx(Trm.all.markers, file = "output/Cd103_CD8_T_DEGs_C2.xlsx")
+```
+
+Plotting
+```{r}
+Trm.plot.markers = c("Id2","Rgs1","Cxcr6","Ccr2","Rps29","Xcl1","Bcl2","Klf2")
+#VlnPlot(CD103_CD8_T, features = Trm.plot.markers, cols = RM.palette.all, stack = TRUE, flip = TRUE)
+DotPlot(CD103_CD8_T, features = Trm.plot.markers, scale = FALSE, dot.scale = 5, cols = c("purple4","gold")) + coord_flip() + labs(x="", y="") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("output/Cd103_CD8_T_DEGs_Dotplot_C2.pdf", height = 4, width = 4)
+```
+
+
+<!-- ## CD103+ CD8 T C5 -->
+<!-- Subset -->
+<!-- ```{r} -->
+<!-- CD103_CD8_T = merge(subset(RM, subset = cluster.names == "Cd103+ CD8 T"), subset(rechallenge, subset = predicted.id == "Cd103+ CD8 T")) -->
+<!-- CD103_CD8_T = subset(CD103_CD8_T, subset = timepoint %in% c("D14","C5_PR8","C5_X31")) -->
+<!-- CD103_CD8_T$timepoint = factor(CD103_CD8_T$timepoint, levels = c("D14","C5_PR8","C5_X31")) -->
+<!-- CD103_CD8_T = SetIdent(CD103_CD8_T, value = "timepoint") -->
+<!-- CD103_CD8_T = PrepSCTFindMarkers(CD103_CD8_T, assay = "SCT", verbose = TRUE) -->
+<!-- ``` -->
+
+<!-- Timepoint comparisons -->
+<!-- ```{r} -->
+<!-- Trm.all.markers = FindAllMarkers(CD103_CD8_T, logfc.threshold = 0.5, min.pct = 0.2, only.pos = FALSE, test.use = "bimod") -->
+<!-- write.xlsx(Trm.all.markers, file = "output/Cd103_CD8_T_DEGs_C5.xlsx") -->
+<!-- ``` -->
+
+<!-- Plotting -->
+<!-- ```{r} -->
+<!-- Trm.plot.markers = c("Id2","Rgs1","Cxcr6","Ccr2","Rps29","Xcl1","Bcl2","Klf2") -->
+<!-- #VlnPlot(CD103_CD8_T, features = Trm.plot.markers, cols = RM.palette.all, stack = TRUE, flip = TRUE) -->
+<!-- DotPlot(CD103_CD8_T, features = Trm.plot.markers, scale = FALSE, dot.scale = 5, cols = c("purple4","gold")) + coord_flip() + labs(x="", y="") -->
+<!-- ggsave("DEG_plots/Cd103_CD8_T_DEGs_Dotplot_C2.pdf", height = 4, width = 4.5) -->
+<!-- ``` -->
+
+## Gzmk+ CD8 T
+Subset
+```{r}
+Gzmk_CD8_T = merge(subset(RM, subset = cluster.names == "Gzmk+ CD8 T"), subset(rechallenge, subset = predicted.id == "Gzmk+ CD8 T"))
+Gzmk_CD8_T = subset(Gzmk_CD8_T, subset = timepoint %in% c("D08","C5_PR8","C5_X31"))
+Gzmk_CD8_T$timepoint = factor(Gzmk_CD8_T$timepoint, levels = c("D08","C5_PR8","C5_X31"))
+Gzmk_CD8_T = SetIdent(Gzmk_CD8_T, value = "timepoint")
+Gzmk_CD8_T = PrepSCTFindMarkers(Gzmk_CD8_T, assay = "SCT", verbose = TRUE)
+```
+
+Timepoint comparisons
+```{r}
+Gzmk_CD8.markers = FindAllMarkers(Gzmk_CD8_T, logfc.threshold = 0.5, min.pct = 0.2, only.pos = FALSE, test.use = "bimod")
+write.xlsx(Gzmk_CD8.markers, file = "output/Gzmk_CD8_T_DEGs.xlsx", rowNames = TRUE)
+```
+
+Plotting
+```{r}
+Gzmk_CD8.plot.markers = c("mt-Nd2","Icos","Ly6c2","Gzmb","Lag3","Fos","Selenoh","Tubb5","H2afv","Birc5")
+DotPlot(Gzmk_CD8_T, features = Gzmk_CD8.plot.markers, scale = FALSE, dot.scale = 5, cols = c("purple4","gold")) + coord_flip() + labs(x="", y="") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("output/Gzmk_CD8_T_DEGs_Dotplot.pdf", height = 4, width = 4)
+```
+
+## Ifng+Cd200+ CD4 T
+Subset
+```{r}
+Ifng_CD4_T = merge(subset(RM, subset = cluster.names == "Ifng+Cd200+ CD4 T"), subset(rechallenge, subset = predicted.id == "Ifng+Cd200+ CD4 T"))
+Ifng_CD4_T = subset(Ifng_CD4_T, subset = timepoint %in% c("D08","C2_PR8","C2_X31"))
+Ifng_CD4_T$timepoint = factor(Ifng_CD4_T$timepoint, levels = c("D08","C2_PR8","C2_X31"))
+Ifng_CD4_T = SetIdent(Ifng_CD4_T, value = "timepoint")
+Ifng_CD4_T = PrepSCTFindMarkers(Ifng_CD4_T, assay = "SCT", verbose = TRUE)
+```
+
+Timepoint comparisons
+```{r}
+Ifng_CD4.markers = FindAllMarkers(Ifng_CD4_T, logfc.threshold = 0.5, min.pct = 0.2, only.pos = FALSE, test.use = "bimod")
+write.xlsx(Ifng_CD4.markers, file = "output/Ifng_CD4_T_DEGs.xlsx", rowNames = TRUE)
+```
+
+Plotting
+```{r}
+Ifng_CD4.plot.markers = c("Cd200","Icos","Tnfrsf4","Batf","Itga1","Rps29","Batf3","Mt2")
+DotPlot(Ifng_CD4_T, features = Ifng_CD4.plot.markers, scale = FALSE, dot.scale = 5, cols = c("purple4","gold")) + coord_flip() + labs(x="", y="") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("output/Ifng_CD4_T_DEGs_Dotplot.pdf", height = 4, width = 4)
+```
+
+## Krt13+Il1a+ Epi (not reported)
+Subset
+```{r}
+epikiller = merge(subset(RM, subset = cluster.names == "Krt13+Il1a+ Epi"), subset(rechallenge, subset = predicted.id == "Krt13+Il1a+ Epi"))
+epikiller = subset(epikiller, subset = timepoint %in% c("D14","D60_PR8","D60_X31","C2_PR8","C2_X31","C5_PR8","C5_X31"))
+epikiller$timepoint = factor(epikiller$timepoint, levels = names(RM.palette.all))
+epikiller = SetIdent(epikiller, value = "timepoint")
+epikiller = PrepSCTFindMarkers(epikiller, assay = "SCT", verbose = TRUE)
+```
+
+Timepoint comparisons
+```{r}
+epikiller.all.markers = FindAllMarkers(epikiller, logfc.threshold = 0.5, min.pct = 0.2, test.use = "bimod", only.pos = TRUE)
+epikiller.all.markers = epikiller.all.markers[epikiller.all.markers$p_val_adj <= 0.05,]
+write.xlsx(Trm.all.markers, file = "primary_and_memory/DEG_plots/epikiller_DEGs.xlsx")
+```
+
+Plotting
+```{r}
+epikiller.plot.markers = c("Ifit3","Irfd1","Calm1","Src","Cd81","Gm10076")
+DotPlot(epikiller, features = epikiller.plot.markers, scale = FALSE, dot.scale = 5, cols = c("purple4","gold")) + coord_flip() + labs(x="", y="")
+ggsave("primary_and_memory/DEG_plots/epikiller_DEGs_Dotplot.pdf", height = 2.5, width = 4.7)
+```
+
+
+# Combine RM and rechallenge
+## Rerunning the UMAP
+Rerun UMAP and save model
+```{r}
+RM = RunUMAP(RM, dims = 1:40, n.neighbors = 30, return.model = TRUE)
+RM.anchors = RM.anchors = FindTransferAnchors(reference = RM,
+                                 query = rechallenge,
+                                 normalization.method = "SCT",
+                                 reference.assay = "SCT",
+                                 reference.reduction = "pca",
+                                 dims = 1:40)
+```
+
+Project UMAP
+```{r}
+rechallenge.projected = IntegrateEmbeddings(anchorset = RM.anchors, reference = RM, query = rechallenge, new.reduction.name = "ref.pca")
+rechallenge.projected = ProjectUMAP(query = rechallenge.projected, query.reduction = "ref.pca", reference = RM, reference.reduction = "pca", reduction.model = "umap")
+```
+
+## Renaming for combining
+Create duplicate columns for cell type and cluster names so they can match between objects
+```{r}
+RM$cell.type.f = RM$cell.type; RM$cluster.name = RM$cluster.names
+rechallenge.projected$cell.type.f = rechallenge.projected$cell.type.cons; rechallenge.projected$cluster.name = rechallenge.projected$predicted.id
+```
+
+Subset metadata matrices
+```{r}
+RM.md.cols.keep = c("orig.ident","nCount_RNA","nFeature_RNA","demux_type","assignment","nCount_HTO","nFeature_HTO",
+                    "percent.mt","nCount_SCT","nFeature_SCT","timepoint","cell.type.f","cluster.name")
+rechallenge.md.cols.keep = c(RM.md.cols.keep, "prediction.score.max")
+
+RM@meta.data = RM@meta.data[,RM.md.cols.keep]
+rechallenge.projected@meta.data = rechallenge.projected@meta.data[,rechallenge.md.cols.keep]
+```
+
+Merge
+```{r}
+rechallenge.projected$id <- 'reference'
+RM$id <- 'query'
+RM.PM.comb.2 <- merge(RM, rechallenge.projected)
+RM.PM.comb.2[["umap"]] <- merge(RM[["umap"]], rechallenge.projected[["ref.umap"]])
+```
+
+Save
+```{r}
+save(RM.PM.comb.2, file = "output/RM_primary_memory_combined.RData", compress = FALSE)
+```
+
